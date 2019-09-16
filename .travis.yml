@@ -5,12 +5,13 @@ compiler:
 
 os:
   - linux
+  - linux-ppc64le
 
 addons:
   apt:
+    update: true
     packages:
       - bc
-      - gcc-multilib
       - libssl-dev
       - llvm-dev
       - libjemalloc1
@@ -20,11 +21,11 @@ addons:
       - libelf-dev
       - selinux-policy-dev
       - libunbound-dev
-      - libunbound-dev:i386
 
 before_install: ./.travis/${TRAVIS_OS_NAME}-prepare.sh
 
-before_script: export PATH=$PATH:$HOME/bin
+before_script:
+  - export PATH=$PATH:$HOME/bin
 
 env:
   - OPTS="--disable-ssl"
@@ -34,14 +35,22 @@ env:
   - TESTSUITE=1 LIBS=-ljemalloc
 
 matrix:
-  include:
-    - os: osx
+#  include:
+#    - os: osx
+#      compiler: clang
+#      env: OPTS="--disable-ssl"
+  exclude:
+   # No 32-bit builds on ppc64le.
+    - os: linux-ppc64le
+      compiler: gcc
+      env: BUILD_ENV="-m32" OPTS="--disable-ssl"
+    - os: linux-ppc64le
       compiler: clang
-      env: OPTS="--disable-ssl"
+      env: BUILD_ENV="-m32" OPTS="--disable-ssl"
 
 script: ./.travis/${TRAVIS_OS_NAME}-build.sh $OPTS
 
 notifications:
   email:
     recipients:
-      - ovs-build@openvswitch.org
+      - wilder@us.ibm.com

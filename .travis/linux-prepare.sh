@@ -12,3 +12,10 @@ cd sparse && make -j4 HAVE_LLVM= install && cd ..
 
 pip install --disable-pip-version-check --user six flake8 hacking
 pip install --user --upgrade docutils
+
+# Include packages needed by specific architectures here.
+if [ $TRAVIS_ARCH == amd64 ]; then
+   sudo apt-get install -y \
+        libunbound-dev:i386 \
+        gcc-multilib
+fi

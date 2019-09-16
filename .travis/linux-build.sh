@@ -6,7 +6,11 @@ set -x
 CFLAGS="-Werror"
 SPARSE_FLAGS=""
 EXTRA_OPTS=""
-TARGET="x86_64-native-linuxapp-gcc"
+if [ $TRAVIS_ARCH == amd64 ]; then
+   TARGET="x86_64-native-linuxapp-gcc"
+elif [ $TRAVIS_ARCH == ppc64le ]; then
+   TARGET="ppc_64-power8-linuxapp-gcc"
+fi
 
 function configure_ovs()
 {
