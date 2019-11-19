@@ -39,7 +39,10 @@ EXTRA_DIST += \
     utilities/docker/ovn_default_sb_port \
     utilities/docker/ovn_default_northd_host \
     utilities/docker/debian/Dockerfile \
-    utilities/docker/debian/build.sh
+    utilities/docker/debian/build.sh \
+    utilities/docker/rhel/Dockerfile \
+    utilities/docker/rhel/build.sh \
+    utilities/docker/install_ovn.sh
 
 CLEANFILES += \
     utilities/ovn-ctl.8 \
@@ -52,7 +55,11 @@ CLEANFILES += \
     utilities/ovn-detrace.1 \
     utilities/ovn-detrace \
     utilities/ovn-appctl.8 \
-    utilities/ovn-appctl
+    utilities/ovn-appctl \
+    utilities/ovn-sim
+
+EXTRA_DIST += utilities/ovn-sim.in
+noinst_SCRIPTS += utilities/ovn-sim
 
 utilities/ovn-lib: $(top_builddir)/config.status
 

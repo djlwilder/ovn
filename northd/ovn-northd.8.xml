@@ -308,6 +308,16 @@
       previously created, it will be associated to the empty_lb logical flow
     </p>
 
+    <p>
+      This table also has a priority-110 flow with the match
+      <code>eth.src == <var>E</var></code> for all logical switch
+      datapaths to move traffic to the next table. Where <var>E</var>
+      is the service monitor mac defined in the
+      <ref column="options:svc_monitor_mac" table="NB_Global"
+      db="OVN_Northbound"/> colum of <ref table="NB_Global"
+      db="OVN_Northbound"/> table.
+    </p>
+
     <h3>Ingress Table 5: Pre-stateful</h3>
 
     <p>
@@ -476,7 +486,10 @@
         </code>, where <var>args</var> contains comma separated IP addresses
         (and optional port numbers) to load balance to.  The address family of
         the IP addresses of <var>args</var> is the same as the address family
-        of <var>VIP</var>
+        of <var>VIP</var>. If health check is enabled, then <var>args</var>
+        will only contain those endpoints whose service monitor status entry
+        in <code>OVN_Southbound</code> db is either <code>online</code> or
+        empty.
       </li>
       <li>
         For all the configured load balancing rules for a switch in
@@ -695,6 +708,51 @@ nd_na_router {
           IP address is intended to detect situations where the network is not
           working as configured, so dropping the request would frustrate that
           intent.
+        </p>
+      </li>
+
+      <li>
+        <p>
+          For each <var>SVC_MON_SRC_IP</var> defined in the value of
+          the <ref column="ip_port_mappings:ENDPOINT_IP"
+          table="Load_Balancer" db="OVN_Northbound"/> column of
+          <ref table="Load_Balancer" db="OVN_Northbound"/> table, priority-110
+          logical flow is added with the match
+          <code>arp.tpa == <var>SVC_MON_SRC_IP</var>
+          &amp;&amp; &amp;&amp; arp.op == 1</code> and applies the action
+        </p>
+
+        <pre>
+eth.dst = eth.src;
+eth.src = <var>E</var>;
+arp.op = 2; /* ARP reply. */
+arp.tha = arp.sha;
+arp.sha = <var>E</var>;
+arp.tpa = arp.spa;
+arp.spa = <var>A</var>;
+outport = inport;
+flags.loopback = 1;
+output;
+        </pre>
+
+        <p>
+          where <var>E</var> is the service monitor source mac defined in
+          the <ref column="options:svc_monitor_mac" table="NB_Global"
+          db="OVN_Northbound"/> column in the <ref table="NB_Global"
+          db="OVN_Northbound"/> table. This mac is used as the source mac
+          in the service monitor packets for the load balancer endpoint IP
+          health checks.
+        </p>
+
+        <p>
+          <var>SVC_MON_SRC_IP</var> is used as the source ip in the
+          service monitor IPv4 packets for the load balancer endpoint IP
+          health checks.
+        </p>
+
+        <p>
+          These flows are required if an ARP request is sent for the IP
+          <var>SVC_MON_SRC_IP</var>.
         </p>
       </li>
 
@@ -952,6 +1010,16 @@ output;
 
     <ul>
       <li>
+        A priorirty-110 flow with the match
+        <code>eth.src == <var>E</var></code> for all logical switch
+        datapaths and applies the action <code>handle_svc_check(inport)</code>.
+        Where <var>E</var> is the service monitor mac defined in the
+        <ref column="options:svc_monitor_mac" table="NB_Global"
+        db="OVN_Northbound"/> colum of <ref table="NB_Global"
+        db="OVN_Northbound"/> table.
+      </li>
+
+      <li>
         A priority-100 flow that punts all IGMP packets to
         <code>ovn-controller</code> if IGMP snooping is enabled on the
         logical switch. The flow also forwards the IGMP packets to the
@@ -1002,6 +1070,20 @@ output;
         <code>:mcast_relay='true'</code> and the switch doesn't have any
         logical port with <ref column="options" table="Logical_Switch_Port"/>
         <code>:mcast_flood='true'</code>.
+      </li>
+
+      <li>
+        Priority-80 flows for each port connected to a logical router
+        matching self originated GARP/ARP request/ND packets. These packets
+        are flooded to the <code>MC_FLOOD</code> which contains all logical
+        ports.
+      </li>
+
+      <li>
+        Priority-75 flows for each IP address/VIP/NAT address owned by a
+        router port connected to the switch. These flows match ARP requests
+        and ND packets for the specific IP addresses.  Matched packets are
+        forwarded only to the router that owns the IP address.
       </li>
 
       <li>
@@ -1084,6 +1166,16 @@ output;
       and action of <code>reg0[0] = 1; next;</code> to act as a hint for
       table <code>Pre-stateful</code> to send IP packets to the connection
       tracker for packet de-fragmentation.
+    </p>
+
+    <p>
+      This table also has a priority-110 flow with the match
+      <code>eth.src == <var>E</var></code> for all logical switch
+      datapaths to move traffic to the next table. Where <var>E</var>
+      is the service monitor mac defined in the
+      <ref column="options:svc_monitor_mac" table="NB_Global"
+      db="OVN_Northbound"/> colum of <ref table="NB_Global"
+      db="OVN_Northbound"/> table.
     </p>
 
     <h3>Egress Table 1: <code>to-lport</code> Pre-ACLs</h3>
@@ -1511,11 +1603,55 @@ output;
 
       <li>
         <p>
-          These flows reply to ARP requests for the virtual IP addresses
-          configured in the router for DNAT or load balancing.  For a
-          configured DNAT IP address or a load balancer IPv4 VIP <var>A</var>,
-          for each router port <var>P</var> with Ethernet
-          address <var>E</var>, a priority-90 flow matches
+          Reply to IPv6 Neighbor Solicitations.  These flows reply to
+          Neighbor Solicitation requests for the router's own IPv6
+          address and populate the logical router's mac binding table.
+        </p>
+
+        <p>
+          For each router port <var>P</var> that
+          owns IPv6 address <var>A</var>, solicited node address <var>S</var>,
+          and Ethernet address <var>E</var>, a priority-90 flow matches
+          <code>inport == <var>P</var> &amp;&amp;
+          nd_ns &amp;&amp; ip6.dst == {<var>A</var>, <var>E</var>} &amp;&amp;
+          nd.target == <var>A</var></code> with the following actions:
+        </p>
+
+        <pre>
+nd_na_router {
+    eth.src = <var>E</var>;
+    ip6.src = <var>A</var>;
+    nd.target = <var>A</var>;
+    nd.tll = <var>E</var>;
+    outport = inport;
+    flags.loopback = 1;
+    output;
+};
+        </pre>
+
+        <p>
+          For the gateway port on a distributed logical router (where
+          one of the logical router ports specifies a
+          <code>redirect-chassis</code>), the above flows replying to
+          IPv6 Neighbor Solicitations are only programmed on the
+          gateway port instance on the <code>redirect-chassis</code>.
+          This behavior avoids generation of multiple replies from
+          different chassis, and allows upstream MAC learning to point
+          to the <code>redirect-chassis</code>.
+        </p>
+      </li>
+
+      <li>
+        <p>
+          These flows reply to ARP requests or IPv6 neighbor solicitation
+          for the virtual IP addresses configured in the router for DNAT
+          or load balancing.
+        </p>
+
+        <p>
+          IPv4: For a configured DNAT IP address or a load balancer
+          IPv4 VIP <var>A</var>, for each router port <var>P</var> with
+          Ethernet address <var>E</var>, a priority-90 flow matches
           <code>inport == <var>P</var> &amp;&amp; arp.op == 1 &amp;&amp;
           arp.tpa == <var>A</var></code> (ARP request)
           with the following actions:
@@ -1532,6 +1668,30 @@ arp.spa = <var>A</var>;
 outport = <var>P</var>;
 flags.loopback = 1;
 output;
+        </pre>
+
+        <p>
+          IPv6: For a configured DNAT IP address or a load balancer
+          IPv6 VIP <var>A</var>, solicited node address <var>S</var>,
+          for each router port <var>P</var> with
+          Ethernet address <var>E</var>, a priority-90 flow matches
+          <code>inport == <var>P</var> &amp;&amp; nd_ns &amp;&amp;
+          ip6.dst == {<var>A</var>, <var>S</var>} &amp;&amp;
+          nd.target == <var>A</var></code>
+          with the following actions:
+        </p>
+
+        <pre>
+eth.dst = eth.src;
+nd_na {
+    eth.src = <var>E</var>;
+    nd.tll = <var>E</var>;
+    ip6.src = <var>A</var>;
+    nd.target = <var>A</var>;
+    outport = <var>P</var>;
+    flags.loopback = 1;
+    output;
+}
         </pre>
 
         <p>
@@ -1571,74 +1731,21 @@ arp.sha = <var>external_mac</var>;
             </pre>
 
             <p>
+              or in the case of IPv6 neighbor solicition:
+            </p>
+
+            <pre>
+eth.src = <var>external_mac</var>;
+nd.tll = <var>external_mac</var>;
+            </pre>
+
+            <p>
               This behavior avoids generation of multiple ARP responses
               from different chassis, and allows upstream MAC learning to
               point to the correct chassis.
             </p>
           </li>
         </ul>
-      </li>
-
-      <li>
-        <p>
-          Reply to IPv6 Neighbor Solicitations.  These flows reply to
-          Neighbor Solicitation requests for the router's own IPv6
-          address and load balancing IPv6 VIPs and populate the logical
-          router's mac binding table.
-        </p>
-
-        <p>
-          For each router port <var>P</var> that
-          owns IPv6 address <var>A</var>, solicited node address <var>S</var>,
-          and Ethernet address <var>E</var>, a priority-90 flow matches
-          <code>inport == <var>P</var> &amp;&amp;
-          nd_ns &amp;&amp; ip6.dst == {<var>A</var>, <var>E</var>} &amp;&amp;
-          nd.target == <var>A</var></code> with the following actions:
-        </p>
-
-        <pre>
-nd_na_router {
-    eth.src = <var>E</var>;
-    ip6.src = <var>A</var>;
-    nd.target = <var>A</var>;
-    nd.tll = <var>E</var>;
-    outport = inport;
-    flags.loopback = 1;
-    output;
-};
-        </pre>
-
-        <p>
-          For each router port <var>P</var> that has load balancing VIP
-          <var>A</var>, solicited node address <var>S</var>, and Ethernet
-          address <var>E</var>, a priority-90 flow matches
-          <code>inport == <var>P</var> &amp;&amp;
-          nd_ns &amp;&amp; ip6.dst == {<var>A</var>, <var>E</var>} &amp;&amp;
-          nd.target == <var>A</var></code> with the following actions:
-        </p>
-
-        <pre>
-nd_na {
-    eth.src = <var>E</var>;
-    ip6.src = <var>A</var>;
-    nd.target = <var>A</var>;
-    nd.tll = <var>E</var>;
-    outport = inport;
-    flags.loopback = 1;
-    output;
-};
-        </pre>
-
-        <p>
-          For the gateway port on a distributed logical router (where
-          one of the logical router ports specifies a
-          <code>redirect-chassis</code>), the above flows replying to
-          IPv6 Neighbor Solicitations are only programmed on the
-          gateway port instance on the <code>redirect-chassis</code>.
-          This behavior avoids generation of multiple replies from
-          different chassis, and allows upstream MAC learning to point
-          to the <code>redirect-chassis</code>.
-        </p>
       </li>
 
       <li>
@@ -1694,10 +1801,11 @@ nd_na {
         handled by one of the flows above, which amounts to ICMP (other than
         echo requests) and fragments with nonzero offsets.  For each IP address
         <var>A</var> owned by the router, a priority-60 flow matches
-        <code>ip4.dst == <var>A</var></code> and drops the traffic.  An
-        exception is made and the above flow is not added if the router
-        port's own IP address is used to SNAT packets passing through that
-        router.
+        <code>ip4.dst == <var>A</var></code> or
+        <code>ip6.dst == <var>A</var></code>
+        and drops the traffic.  An exception is made and the above flow
+        is not added if the router port's own IP address is used to SNAT
+        packets passing through that router.
       </li>
     </ul>
 
@@ -1791,23 +1899,29 @@ icmp6 {
         <p>
           If the Gateway router has been configured to force SNAT any
           previously DNATted packets to <var>B</var>, a priority-110 flow
-          matches <code>ip &amp;&amp; ip4.dst == <var>B</var></code> with
-          an action <code>ct_snat; </code>.
+          matches <code>ip &amp;&amp; ip4.dst == <var>B</var></code> or
+          <code>ip &amp;&amp; ip6.dst == <var>B</var></code>
+          with an action <code>ct_snat; </code>.
         </p>
 
         <p>
           If the Gateway router has been configured to force SNAT any
           previously load-balanced packets to <var>B</var>, a priority-100 flow
-          matches <code>ip &amp;&amp; ip4.dst == <var>B</var></code> with
-          an action <code>ct_snat; </code>.
+          matches <code>ip &amp;&amp; ip4.dst == <var>B</var></code> or
+          <code>ip &amp;&amp; ip6.dst == <var>B</var></code>
+          with an action <code>ct_snat; </code>.
         </p>
 
         <p>
           For each NAT configuration in the OVN Northbound database, that asks
           to change the source IP address of a packet from <var>A</var> to
-          <var>B</var>, a priority-90 flow matches <code>ip &amp;&amp;
-          ip4.dst == <var>B</var></code> with an action
-          <code>ct_snat; </code>.
+          <var>B</var>, a priority-90 flow matches
+          <code>ip &amp;&amp; ip4.dst == <var>B</var></code> or
+          <code>ip &amp;&amp; ip6.dst == <var>B</var></code>
+          with an action <code>ct_snat; </code>. If the NAT rule is of type
+          dnat_and_snat and has <code>stateless=true</code> in the
+          options, then the action would be <code>ip4/6.dst=
+          (<var>B</var>)</code>.
         </p>
 
         <p>
@@ -1825,9 +1939,14 @@ icmp6 {
           For each configuration in the OVN Northbound database, that asks
           to change the source IP address of a packet from <var>A</var> to
           <var>B</var>, a priority-100 flow matches <code>ip &amp;&amp;
-          ip4.dst == <var>B</var> &amp;&amp; inport == <var>GW</var></code>,
+          ip4.dst == <var>B</var> &amp;&amp; inport == <var>GW</var></code> or
+          <code>ip &amp;&amp;
+          ip6.dst == <var>B</var> &amp;&amp; inport == <var>GW</var></code>
           where <var>GW</var> is the logical router gateway port, with an
-          action <code>ct_snat;</code>.
+          action <code>ct_snat;</code>. If the NAT rule is of type
+          dnat_and_snat and has <code>stateless=true</code> in the
+          options, then the action would be <code>ip4/6.dst=
+          (<var>B</var>)</code>.
         </p>
 
         <p>
@@ -1839,10 +1958,12 @@ icmp6 {
         <p>
           For each configuration in the OVN Northbound database, that asks
           to change the source IP address of a packet from <var>A</var> to
-          <var>B</var>, a priority-50 flow matches <code>ip &amp;&amp;
-          ip4.dst == <var>B</var></code> with an action
+          <var>B</var>, a priority-50 flow matches
+          <code>ip &amp;&amp; ip4.dst == <var>B</var></code> or
+          <code>ip &amp;&amp; ip6.dst == <var>B</var></code>
+          with an action
           <code>REGBIT_NAT_REDIRECT = 1; next;</code>.  This flow is for
-          east/west traffic to a NAT destination IPv4 address.  By
+          east/west traffic to a NAT destination IPv4/IPv6 address.  By
           setting the <code>REGBIT_NAT_REDIRECT</code> flag, in the
           ingress table <code>Gateway Redirect</code> this will trigger a
           redirect to the instance of the gateway port on the
@@ -1888,25 +2009,30 @@ icmp6 {
         For all the configured load balancing rules for a Gateway router or
         Router with gateway port in <code>OVN_Northbound</code> database that
         includes a L4 port <var>PORT</var> of protocol <var>P</var> and IPv4
-        address <var>VIP</var>, a priority-120 flow that matches on
+        or IPv6 address <var>VIP</var>, a priority-120 flow that matches on
         <code>ct.new &amp;&amp; ip &amp;&amp; ip4.dst == <var>VIP</var>
         &amp;&amp; <var>P</var> &amp;&amp; <var>P</var>.dst == <var>PORT
-        </var></code> with an action of <code>ct_lb(<var>args</var>)</code>,
-        where <var>args</var> contains comma separated IPv4 addresses (and
-        optional port numbers) to load balance to.  If the router is configured
-        to force SNAT any load-balanced packets, the above action will be
-        replaced by <code>flags.force_snat_for_lb = 1;
-        ct_lb(<var>args</var>);</code>.
+        </var></code> (<code>ip6.dst == <var>VIP</var></code> in the IPv6 case)
+        with an action of <code>ct_lb(<var>args</var>)</code>,
+        where <var>args</var> contains comma separated IPv4 or IPv6 addresses
+        (and optional port numbers) to load balance to.  If the router is
+        configured to force SNAT any load-balanced packets, the above action
+        will be replaced by <code>flags.force_snat_for_lb = 1;
+        ct_lb(<var>args</var>);</code>. If health check is enabled, then
+        <var>args</var> will only contain those endpoints whose service
+        monitor status entry in <code>OVN_Southbound</code> db is
+        either <code>online</code> or empty.
       </li>
 
       <li>
         For all the configured load balancing rules for a router in
         <code>OVN_Northbound</code> database that includes a L4 port
-        <var>PORT</var> of protocol <var>P</var> and IPv4 address
+        <var>PORT</var> of protocol <var>P</var> and IPv4 or IPv6 address
         <var>VIP</var>, a priority-120 flow that matches on
         <code>ct.est &amp;&amp; ip &amp;&amp; ip4.dst == <var>VIP</var>
         &amp;&amp; <var>P</var> &amp;&amp; <var>P</var>.dst == <var>PORT
-        </var></code> with an action of <code>ct_dnat;</code>. If the router is
+        </var></code> (<code>ip6.dst == <var>VIP</var></code> in the IPv6 case)
+        with an action of <code>ct_dnat;</code>. If the router is
         configured to force SNAT any load-balanced packets, the above action
         will be replaced by <code>flags.force_snat_for_lb = 1; ct_dnat;</code>.
       </li>
@@ -1916,11 +2042,13 @@ icmp6 {
         <code>OVN_Northbound</code> database that includes just an IP address
         <var>VIP</var> to match on, a priority-110 flow that matches on
         <code>ct.new &amp;&amp; ip &amp;&amp; ip4.dst ==
-        <var>VIP</var></code> with an action of
+        <var>VIP</var></code> (<code>ip6.dst == <var>VIP</var></code> in the
+        IPv6 case) with an action of
         <code>ct_lb(<var>args</var>)</code>, where <var>args</var> contains
-        comma separated IPv4 addresses.  If the router is configured to force
-        SNAT any load-balanced packets, the above action will be replaced by
-        <code>flags.force_snat_for_lb = 1; ct_lb(<var>args</var>);</code>.
+        comma separated IPv4 or IPv6 addresses.  If the router is configured
+        to force SNAT any load-balanced packets, the above action will be
+        replaced by <code>flags.force_snat_for_lb = 1;
+        ct_lb(<var>args</var>);</code>.
       </li>
 
       <li>
@@ -1928,7 +2056,8 @@ icmp6 {
         <code>OVN_Northbound</code> database that includes just an IP address
         <var>VIP</var> to match on, a priority-110 flow that matches on
         <code>ct.est &amp;&amp; ip &amp;&amp; ip4.dst ==
-        <var>VIP</var></code> with an action of <code>ct_dnat;</code>.
+        <var>VIP</var></code> (or <code>ip6.dst == <var>VIP</var></code>)
+        with an action of <code>ct_dnat;</code>.
         If the router is configured to force SNAT any load-balanced
         packets, the above action will be replaced by
         <code>flags.force_snat_for_lb = 1; ct_dnat;</code>.
@@ -1942,12 +2071,16 @@ icmp6 {
         For each configuration in the OVN Northbound database, that asks
         to change the destination IP address of a packet from <var>A</var> to
         <var>B</var>, a priority-100 flow matches <code>ip &amp;&amp;
-        ip4.dst == <var>A</var></code> with an action
+        ip4.dst == <var>A</var></code> or <code>ip &amp;&amp;
+        ip6.dst == <var>A</var></code> with an action
         <code>flags.loopback = 1; ct_dnat(<var>B</var>);</code>.  If the
         Gateway router is configured to force SNAT any DNATed packet,
         the above action will be replaced by
         <code>flags.force_snat_for_dnat = 1; flags.loopback = 1;
-        ct_dnat(<var>B</var>);</code>.
+        ct_dnat(<var>B</var>);</code>. If the NAT rule is of type
+        dnat_and_snat and has <code>stateless=true</code> in the
+        options, then the action would be <code>ip4/6.dst=
+        (<var>B</var>)</code>.
       </li>
 
       <li>
@@ -1979,7 +2112,11 @@ icmp6 {
           <var>B</var>, a priority-100 flow matches <code>ip &amp;&amp;
           ip4.dst == <var>B</var> &amp;&amp; inport == <var>GW</var></code>,
           where <var>GW</var> is the logical router gateway port, with an
-          action <code>ct_dnat(<var>B</var>);</code>.
+          action <code>ct_dnat(<var>B</var>);</code>.  The match will
+          include <code>ip6.dst == <var>B</var></code> in the IPv6 case.
+          If the NAT rule is of type dnat_and_snat and has
+          <code>stateless=true</code> in the options, then the action
+          would be <code>ip4/6.dst=(<var>B</var>)</code>.
         </p>
 
         <p>
@@ -1992,9 +2129,10 @@ icmp6 {
           For each configuration in the OVN Northbound database, that asks
           to change the destination IP address of a packet from <var>A</var> to
           <var>B</var>, a priority-50 flow matches <code>ip &amp;&amp;
-          ip4.dst == <var>B</var></code> with an action
+          ip4.dst == <var>B</var></code> or <code>ip &amp;&amp;
+          ip6.dst == <var>B</var></code> with an action
           <code>REGBIT_NAT_REDIRECT = 1; next;</code>.  This flow is for
-          east/west traffic to a NAT destination IPv4 address.  By
+          east/west traffic to a NAT destination IPv4/IPv6 address.  By
           setting the <code>REGBIT_NAT_REDIRECT</code> flag, in the
           ingress table <code>Gateway Redirect</code> this will trigger a
           redirect to the instance of the gateway port on the
@@ -2149,8 +2287,8 @@ logical_ip{0,1} = <var>LIP{0,1}</var>;
         <pre>
 eth.dst = <var>MAC0</var>;
 eth.src = <var>MAC1</var>;
-reg0 = ip4.dst;
-reg1 = <var>EIP1</var>;
+reg0 = ip4.dst; /* xxreg0 = ip6.dst; in the IPv6 case */
+reg1 = <var>EIP1</var>; /* xxreg1 in the IPv6 case */
 outport = <code>redirect-chassis-port</code>;
 <code>REGBIT_DISTRIBUTED_NAT = 1; next;</code>.
         </pre>
@@ -2653,7 +2791,10 @@ nd_ns {
           matches <code>ip &amp;&amp; ip4.src == <var>B</var>
           &amp;&amp; outport == <var>GW</var></code>, where <var>GW</var>
           is the logical router gateway port, with an action
-          <code>ct_dnat;</code>.
+          <code>ct_dnat;</code>. If the NAT rule is of type
+          dnat_and_snat and has <code>stateless=true</code> in the
+          options, then the action would be <code>ip4/6.src=
+          (<var>B</var>)</code>.
         </p>
 
         <p>
@@ -2711,7 +2852,10 @@ nd_ns {
           <code>ip &amp;&amp; ip4.src == <var>A</var></code> with an action
           <code>ct_snat(<var>B</var>);</code>.  The priority of the flow
           is calculated based on the mask of <var>A</var>, with matches
-          having larger masks getting higher priorities.
+          having larger masks getting higher priorities. If the NAT rule is
+          of type dnat_and_snat and has <code>stateless=true</code> in the
+          options, then the action would be <code>ip4/6.src=
+          (<var>B</var>)</code>.
         </p>
         <p>
           A priority-0 logical flow with match <code>1</code> has actions
@@ -2734,7 +2878,10 @@ nd_ns {
           logical router gateway port, with an action
           <code>ct_snat(<var>B</var>);</code>.  The priority of the flow
           is calculated based on the mask of <var>A</var>, with matches
-          having larger masks getting higher priorities.
+          having larger masks getting higher priorities. If the NAT rule
+          is of type dnat_and_snat and has <code>stateless=true</code>
+          in the options, then the action would be <code>ip4/6.src=
+          (<var>B</var>)</code>.
         </p>
 
         <p>

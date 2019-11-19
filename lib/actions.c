@@ -755,11 +755,18 @@ parse_ct_nat(struct action_context *ctx, const char *name,
 
     if (lexer_match(ctx->lexer, LEX_T_LPAREN)) {
         if (ctx->lexer->token.type != LEX_T_INTEGER
-            || ctx->lexer->token.format != LEX_F_IPV4) {
-            lexer_syntax_error(ctx->lexer, "expecting IPv4 address");
+            || (ctx->lexer->token.format != LEX_F_IPV4
+                && ctx->lexer->token.format != LEX_F_IPV6)) {
+            lexer_syntax_error(ctx->lexer, "expecting IPv4 or IPv6 address");
             return;
         }
-        cn->ip = ctx->lexer->token.value.ipv4;
+        if (ctx->lexer->token.format == LEX_F_IPV4) {
+            cn->family = AF_INET;
+            cn->ipv4 = ctx->lexer->token.value.ipv4;
+        } else if (ctx->lexer->token.format == LEX_F_IPV6) {
+            cn->family = AF_INET6;
+            cn->ipv6 = ctx->lexer->token.value.ipv6;
+        }
         lexer_get(ctx->lexer);
 
         if (!lexer_force_match(ctx->lexer, LEX_T_RPAREN)) {
@@ -784,8 +791,12 @@ static void
 format_ct_nat(const struct ovnact_ct_nat *cn, const char *name, struct ds *s)
 {
     ds_put_cstr(s, name);
-    if (cn->ip) {
-        ds_put_format(s, "("IP_FMT")", IP_ARGS(cn->ip));
+    if (cn->family == AF_INET) {
+        ds_put_format(s, "("IP_FMT")", IP_ARGS(cn->ipv4));
+    } else if (cn->family == AF_INET6) {
+        ds_put_char(s, '(');
+        ipv6_format_addr(&cn->ipv6, s);
+        ds_put_char(s, ')');
     }
     ds_put_char(s, ';');
 }
@@ -831,9 +842,17 @@ encode_ct_nat(const struct ovnact_ct_nat *cn,
     nat->flags = 0;
     nat->range_af = AF_UNSPEC;
 
-    if (cn->ip) {
+    if (cn->family == AF_INET) {
         nat->range_af = AF_INET;
-        nat->range.addr.ipv4.min = cn->ip;
+        nat->range.addr.ipv4.min = cn->ipv4;
+        if (snat) {
+            nat->flags |= NX_NAT_F_SRC;
+        } else {
+            nat->flags |= NX_NAT_F_DST;
+        }
+    } else if (cn->family == AF_INET6) {
+        nat->range_af = AF_INET6;
+        nat->range.addr.ipv6.min = cn->ipv6;
         if (snat) {
             nat->flags |= NX_NAT_F_SRC;
         } else {
@@ -843,7 +862,7 @@ encode_ct_nat(const struct ovnact_ct_nat *cn,
 
     ofpacts->header = ofpbuf_push_uninit(ofpacts, nat_offset);
     ct = ofpacts->header;
-    if (cn->ip) {
+    if (cn->family == AF_INET || cn->family == AF_INET6) {
         ct->flags |= NX_CT_F_COMMIT;
     }
     ofpact_finish(ofpacts, &ct->ofpact);
@@ -2795,6 +2814,46 @@ ovnact_bind_vport_free(struct ovnact_bind_vport *bp)
     free(bp->vport);
 }
 
+static void
+parse_handle_svc_check(struct action_context *ctx OVS_UNUSED)
+{
+     if (!lexer_force_match(ctx->lexer, LEX_T_LPAREN)) {
+        return;
+    }
+
+    struct ovnact_handle_svc_check *svc_chk =
+        ovnact_put_HANDLE_SVC_CHECK(ctx->ovnacts);
+    action_parse_field(ctx, 0, false, &svc_chk->port);
+    lexer_force_match(ctx->lexer, LEX_T_RPAREN);
+}
+
+static void
+format_HANDLE_SVC_CHECK(const struct ovnact_handle_svc_check *svc_chk,
+                        struct ds *s)
+{
+    ds_put_cstr(s, "handle_svc_check(");
+    expr_field_format(&svc_chk->port, s);
+    ds_put_cstr(s, ");");
+}
+
+static void
+encode_HANDLE_SVC_CHECK(const struct ovnact_handle_svc_check *svc_chk,
+                        const struct ovnact_encode_params *ep OVS_UNUSED,
+                        struct ofpbuf *ofpacts)
+{
+    const struct arg args[] = {
+        { expr_resolve_field(&svc_chk->port), MFF_LOG_INPORT },
+    };
+    encode_setup_args(args, ARRAY_SIZE(args), ofpacts);
+    encode_controller_op(ACTION_OPCODE_HANDLE_SVC_CHECK, ofpacts);
+    encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
+}
+
+static void
+ovnact_handle_svc_check_free(struct ovnact_handle_svc_check *sc OVS_UNUSED)
+{
+}
+
 /* Parses an assignment or exchange or put_dhcp_opts action. */
 static void
 parse_set_action(struct action_context *ctx)
@@ -2912,6 +2971,8 @@ parse_action(struct action_context *ctx)
         parse_trigger_event(ctx, ovnact_put_TRIGGER_EVENT(ctx->ovnacts));
     } else if (lexer_match_id(ctx->lexer, "bind_vport")) {
         parse_bind_vport(ctx);
+    } else if (lexer_match_id(ctx->lexer, "handle_svc_check")) {
+        parse_handle_svc_check(ctx);
     } else {
         lexer_syntax_error(ctx->lexer, "expecting action");
     }

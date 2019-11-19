@@ -136,6 +136,9 @@ main(int argc, char *argv[])
 
     nbctl_cmd_init();
 
+    /* Check if options are set via env var. */
+    argv = ovs_cmdl_env_parse_all(&argc, argv, getenv("OVN_NBCTL_OPTIONS"));
+
     /* ovn-nbctl has three operation modes:
      *
      *    - Direct: Executes commands by contacting ovsdb-server directly.
@@ -691,6 +694,7 @@ Policy commands:\n\
   lr-policy-list ROUTER     print policies for ROUTER\n\
 \n\
 NAT commands:\n\
+  [--stateless]\n\
   lr-nat-add ROUTER TYPE EXTERNAL_IP LOGICAL_IP [LOGICAL_PORT EXTERNAL_MAC]\n\
                             add a NAT to ROUTER\n\
   lr-nat-del ROUTER [TYPE [IP]]\n\
@@ -3867,26 +3871,51 @@ nbctl_lr_nat_add(struct ctl_context *ctx)
 
     ovs_be32 ipv4 = 0;
     unsigned int plen;
+    struct in6_addr ipv6;
+    bool is_v6 = false;
     if (!ip_parse(external_ip, &ipv4)) {
-        ctl_error(ctx, "%s: should be an IPv4 address.", external_ip);
-        return;
+        if (ipv6_parse(external_ip, &ipv6)) {
+            is_v6 = true;
+        } else {
+            ctl_error(ctx, "%s: Not a valid IPv4 or IPv6 address.",
+                      external_ip);
+            return;
+        }
     }
 
     if (strcmp("snat", nat_type)) {
-        if (!ip_parse(logical_ip, &ipv4)) {
-            ctl_error(ctx, "%s: should be an IPv4 address.", logical_ip);
-            return;
+        if (is_v6) {
+            if (!ipv6_parse(logical_ip, &ipv6)) {
+                ctl_error(ctx, "%s: Not a valid IPv6 address.", logical_ip);
+                return;
+            }
+        } else {
+            if (!ip_parse(logical_ip, &ipv4)) {
+                ctl_error(ctx, "%s: Not a valid IPv4 address.", logical_ip);
+                return;
+            }
         }
         new_logical_ip = xstrdup(logical_ip);
     } else {
-        error = ip_parse_cidr(logical_ip, &ipv4, &plen);
-        if (error) {
-            free(error);
-            ctl_error(ctx, "%s: should be an IPv4 address or network.",
-                      logical_ip);
-            return;
+        if (is_v6) {
+            error = ipv6_parse_cidr(logical_ip, &ipv6, &plen);
+            if (error) {
+                free(error);
+                ctl_error(ctx, "%s: should be an IPv6 address or network.",
+                          logical_ip);
+                return;
+            }
+            new_logical_ip = normalize_ipv6_prefix(ipv6, plen);
+        } else {
+            error = ip_parse_cidr(logical_ip, &ipv4, &plen);
+            if (error) {
+                free(error);
+                ctl_error(ctx, "%s: should be an IPv4 address or network.",
+                          logical_ip);
+                return;
+            }
+            new_logical_ip = normalize_ipv4_prefix(ipv4, plen);
         }
-        new_logical_ip = normalize_ipv4_prefix(ipv4, plen);
     }
 
     const char *logical_port;
@@ -3926,6 +3955,13 @@ nbctl_lr_nat_add(struct ctl_context *ctx)
     }
 
     bool may_exist = shash_find(&ctx->options, "--may-exist") != NULL;
+    bool stateless = shash_find(&ctx->options, "--stateless") != NULL;
+
+    if (strcmp(nat_type, "dnat_and_snat") && stateless) {
+        ctl_error(ctx, "stateless is not applicable to dnat or snat types");
+        return;
+    }
+
     int is_snat = !strcmp("snat", nat_type);
     for (size_t i = 0; i < lr->n_nat; i++) {
         const struct nbrec_nat *nat = lr->nat[i];
@@ -3957,10 +3993,25 @@ nbctl_lr_nat_add(struct ctl_context *ctx)
                     return;
                 }
             }
+
+        }
+        if (!strcmp(nat_type, "dnat_and_snat") ||
+            !strcmp(nat->type, "dnat_and_snat")) {
+
+            if (!strcmp(nat->external_ip, external_ip)) {
+                struct smap nat_options = SMAP_INITIALIZER(&nat_options);
+                if (!strcmp(smap_get(&nat->options, "stateless"),
+                            "true") || stateless) {
+                    ctl_error(ctx, "%s, %s: External ip cannot be shared "
+                              "across stateless and stateful NATs",
+                              external_ip, new_logical_ip);
+                }
+            }
         }
     }
 
     /* Create the NAT. */
+    struct smap nat_options = SMAP_INITIALIZER(&nat_options);
     struct nbrec_nat *nat = nbrec_nat_insert(ctx->txn);
     nbrec_nat_set_type(nat, nat_type);
     nbrec_nat_set_external_ip(nat, external_ip);
@@ -3969,7 +4020,12 @@ nbctl_lr_nat_add(struct ctl_context *ctx)
         nbrec_nat_set_logical_port(nat, logical_port);
         nbrec_nat_set_external_mac(nat, external_mac);
     }
+
+    smap_add(&nat_options, "stateless", stateless ? "true":"false");
+    nbrec_nat_set_options(nat, &nat_options);
+
     free(new_logical_ip);
+    smap_destroy(&nat_options);
 
     /* Insert the NAT into the logical router. */
     nbrec_logical_router_verify_nat(lr);
@@ -5689,7 +5745,7 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     /* NAT commands. */
     { "lr-nat-add", 4, 6,
       "ROUTER TYPE EXTERNAL_IP LOGICAL_IP [LOGICAL_PORT EXTERNAL_MAC]", NULL,
-      nbctl_lr_nat_add, NULL, "--may-exist", RW },
+      nbctl_lr_nat_add, NULL, "--may-exist,--stateless", RW },
     { "lr-nat-del", 1, 3, "ROUTER [TYPE [IP]]", NULL,
         nbctl_lr_nat_del, NULL, "--if-exists", RW },
     { "lr-nat-list", 1, 1, "ROUTER", NULL, nbctl_lr_nat_list, NULL, "", RO },

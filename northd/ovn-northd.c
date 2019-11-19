@@ -66,6 +66,15 @@ struct northd_context {
     struct ovsdb_idl_index *sbrec_ip_mcast_by_dp;
 };
 
+/* An IPv4 or IPv6 address */
+struct v46_ip {
+    int family;
+    union {
+        ovs_be32 ipv4;
+        struct in6_addr ipv6;
+    };
+};
+
 static const char *ovnnb_db;
 static const char *ovnsb_db;
 static const char *unixctl_path;
@@ -78,6 +87,13 @@ static struct hmap macam = HMAP_INITIALIZER(&macam);
 static struct eth_addr mac_prefix;
 
 static bool controller_event_en;
+
+/* MAC allocated for service monitor usage. Just one mac is allocated
+ * for this purpose and ovn-controller's on each chassis will make use
+ * of this mac when sending out the packets to monitor the services
+ * defined in Service_Monitor Southbound table. Since these packets
+ * all locally handled, having just one mac is good enough. */
+static char svc_monitor_mac[ETH_ADDR_STRLEN + 1];
 
 #define MAX_OVN_TAGS 4096
 
@@ -200,6 +216,8 @@ enum ovn_stage {
 #define REGBIT_PKT_LARGER        "reg9[3]"
 #define REGBIT_LOOKUP_NEIGHBOR_RESULT "reg9[4]"
 #define REGBIT_SKIP_LOOKUP_NEIGHBOR "reg9[5]"
+
+#define FLAGBIT_NOT_VXLAN "flags[1] == 0"
 
 /* Returns an "enum ovn_stage" built from the arguments. */
 static enum ovn_stage
@@ -1193,6 +1211,34 @@ ovn_port_allocate_key(struct ovn_datapath *od)
                           1, (1u << 15) - 1, &od->port_key_hint);
 }
 
+/* Returns true if the logical switch port 'enabled' column is empty or
+ * set to true.  Otherwise, returns false. */
+static bool
+lsp_is_enabled(const struct nbrec_logical_switch_port *lsp)
+{
+    return !lsp->n_enabled || *lsp->enabled;
+}
+
+/* Returns true only if the logical switch port 'up' column is set to true.
+ * Otherwise, if the column is not set or set to false, returns false. */
+static bool
+lsp_is_up(const struct nbrec_logical_switch_port *lsp)
+{
+    return lsp->n_up && *lsp->up;
+}
+
+static bool
+lsp_is_external(const struct nbrec_logical_switch_port *nbsp)
+{
+    return !strcmp(nbsp->type, "external");
+}
+
+static bool
+lrport_is_enabled(const struct nbrec_logical_router_port *lrport)
+{
+    return !lrport->enabled || *lrport->enabled;
+}
+
 static char *
 chassis_redirect_name(const char *port_name)
 {
@@ -2175,7 +2221,7 @@ ip_address_and_port_from_lb_key(const char *key, char **ip_address,
 
 static void
 get_router_load_balancer_ips(const struct ovn_datapath *od,
-                             struct sset *all_ips, int *addr_family)
+                             struct sset *all_ips_v4, struct sset *all_ips_v6)
 {
     if (!od->nbr) {
         return;
@@ -2190,11 +2236,19 @@ get_router_load_balancer_ips(const struct ovn_datapath *od,
             /* node->key contains IP:port or just IP. */
             char *ip_address = NULL;
             uint16_t port;
+            int addr_family;
 
             ip_address_and_port_from_lb_key(node->key, &ip_address, &port,
-                                            addr_family);
+                                            &addr_family);
             if (!ip_address) {
                 continue;
+            }
+
+            struct sset *all_ips;
+            if (addr_family == AF_INET) {
+                all_ips = all_ips_v4;
+            } else {
+                all_ips = all_ips_v6;
             }
 
             if (!sset_contains(all_ips, ip_address)) {
@@ -2273,6 +2327,15 @@ get_nat_addresses(const struct ovn_port *op, size_t *n)
                     break;
                 }
             }
+            if (!is_router_ip) {
+                for (size_t j = 0; j < op->lrp_networks.n_ipv6_addrs; j++) {
+                    if (!strcmp(nat->external_ip,
+                                op->lrp_networks.ipv6_addrs[j].addr_s)) {
+                        is_router_ip = true;
+                        break;
+                    }
+                }
+            }
 
             if (!is_router_ip) {
                 ds_put_format(&c_addresses, " %s", nat->external_ip);
@@ -2281,17 +2344,22 @@ get_nat_addresses(const struct ovn_port *op, size_t *n)
         }
     }
 
-    /* A set to hold all load-balancer vips. */
-    struct sset all_ips = SSET_INITIALIZER(&all_ips);
-    int addr_family;
-    get_router_load_balancer_ips(op->od, &all_ips, &addr_family);
+    /* Two sets to hold all load-balancer vips. */
+    struct sset all_ips_v4 = SSET_INITIALIZER(&all_ips_v4);
+    struct sset all_ips_v6 = SSET_INITIALIZER(&all_ips_v6);
+    get_router_load_balancer_ips(op->od, &all_ips_v4, &all_ips_v6);
 
     const char *ip_address;
-    SSET_FOR_EACH (ip_address, &all_ips) {
+    SSET_FOR_EACH (ip_address, &all_ips_v4) {
         ds_put_format(&c_addresses, " %s", ip_address);
         central_ip_address = true;
     }
-    sset_destroy(&all_ips);
+    SSET_FOR_EACH (ip_address, &all_ips_v6) {
+        ds_put_format(&c_addresses, " %s", ip_address);
+        central_ip_address = true;
+    }
+    sset_destroy(&all_ips_v4);
+    sset_destroy(&all_ips_v6);
 
     if (central_ip_address) {
         /* Gratuitous ARP for centralized NAT rules on distributed gateway
@@ -2914,6 +2982,291 @@ cleanup_sb_ha_chassis_groups(struct northd_context *ctx,
         if (!sset_contains(active_ha_chassis_groups, b->name)) {
             sbrec_ha_chassis_group_delete(b);
         }
+    }
+}
+
+struct ovn_lb {
+    struct hmap_node hmap_node;
+
+    const struct nbrec_load_balancer *nlb; /* May be NULL. */
+
+    struct lb_vip *vips;
+    size_t n_vips;
+};
+
+struct lb_vip {
+    char *vip;
+    uint16_t vip_port;
+    int addr_family;
+    char *backend_ips;
+
+    bool health_check;
+    struct lb_vip_backend *backends;
+    size_t n_backends;
+};
+
+struct lb_vip_backend {
+    char *ip;
+    uint16_t port;
+
+    struct ovn_port *op; /* Logical port to which the ip belong to. */
+    bool health_check;
+    char *svc_mon_src_ip; /* Source IP to use for monitoring. */
+    const struct sbrec_service_monitor *sbrec_monitor;
+};
+
+
+static inline struct ovn_lb *
+ovn_lb_find(struct hmap *lbs, struct uuid *uuid)
+{
+    struct ovn_lb *lb;
+    size_t hash = uuid_hash(uuid);
+    HMAP_FOR_EACH_WITH_HASH (lb, hmap_node, hash, lbs) {
+        if (uuid_equals(&lb->nlb->header_.uuid, uuid)) {
+            return lb;
+        }
+    }
+
+    return NULL;
+}
+
+
+struct service_monitor_info {
+    struct hmap_node hmap_node;
+    const struct sbrec_service_monitor *sbrec_mon;
+    bool required;
+};
+
+
+static struct service_monitor_info *
+create_or_get_service_mon(struct northd_context *ctx,
+                          struct hmap *monitor_map,
+                          const char *ip, const char *logical_port,
+                          uint16_t service_port, const char *protocol)
+{
+    uint32_t hash = service_port;
+    hash = hash_string(ip, hash);
+    hash = hash_string(logical_port, hash);
+    struct service_monitor_info *mon_info;
+
+    HMAP_FOR_EACH_WITH_HASH (mon_info, hmap_node, hash, monitor_map) {
+        if (mon_info->sbrec_mon->port == service_port &&
+            !strcmp(mon_info->sbrec_mon->ip, ip) &&
+            !strcmp(mon_info->sbrec_mon->protocol, protocol) &&
+            !strcmp(mon_info->sbrec_mon->logical_port, logical_port)) {
+            return mon_info;
+        }
+    }
+
+    struct sbrec_service_monitor *sbrec_mon =
+        sbrec_service_monitor_insert(ctx->ovnsb_txn);
+    sbrec_service_monitor_set_ip(sbrec_mon, ip);
+    sbrec_service_monitor_set_port(sbrec_mon, service_port);
+    sbrec_service_monitor_set_logical_port(sbrec_mon, logical_port);
+    sbrec_service_monitor_set_protocol(sbrec_mon, protocol);
+    mon_info = xzalloc(sizeof *mon_info);
+    mon_info->sbrec_mon = sbrec_mon;
+    hmap_insert(monitor_map, &mon_info->hmap_node, hash);
+    return mon_info;
+}
+
+static struct ovn_lb *
+ovn_lb_create(struct northd_context *ctx, struct hmap *lbs,
+              const struct nbrec_load_balancer *nbrec_lb,
+              struct hmap *ports, struct hmap *monitor_map)
+{
+    struct ovn_lb *lb = xzalloc(sizeof *lb);
+
+    size_t hash = uuid_hash(&nbrec_lb->header_.uuid);
+    lb->nlb = nbrec_lb;
+    hmap_insert(lbs, &lb->hmap_node, hash);
+
+    lb->n_vips = smap_count(&nbrec_lb->vips);
+    lb->vips = xcalloc(lb->n_vips, sizeof (struct lb_vip));
+    struct smap_node *node;
+    size_t n_vips = 0;
+
+    SMAP_FOR_EACH (node, &nbrec_lb->vips) {
+        char *vip = NULL;
+        uint16_t port;
+        int addr_family;
+
+        ip_address_and_port_from_lb_key(node->key, &vip, &port,
+                                        &addr_family);
+        if (!vip) {
+            continue;
+        }
+
+        lb->vips[n_vips].vip = vip;
+        lb->vips[n_vips].vip_port = port;
+        lb->vips[n_vips].addr_family = addr_family;
+        lb->vips[n_vips].backend_ips = xstrdup(node->value);
+
+        struct nbrec_load_balancer_health_check *lb_health_check = NULL;
+        for (size_t i = 0; i < nbrec_lb->n_health_check; i++) {
+            if (!strcmp(nbrec_lb->health_check[i]->vip, node->key)) {
+                lb_health_check = nbrec_lb->health_check[i];
+                break;
+            }
+        }
+
+        char *tokstr = xstrdup(node->value);
+        char *save_ptr = NULL;
+        char *token;
+        size_t n_backends = 0;
+        /* Format for a backend ips : IP1:port1,IP2:port2,...". */
+        for (token = strtok_r(tokstr, ",", &save_ptr);
+            token != NULL;
+            token = strtok_r(NULL, ",", &save_ptr)) {
+            n_backends++;
+        }
+
+        free(tokstr);
+        tokstr = xstrdup(node->value);
+        save_ptr = NULL;
+
+        lb->vips[n_vips].n_backends = n_backends;
+        lb->vips[n_vips].backends = xcalloc(n_backends,
+                                            sizeof (struct lb_vip_backend));
+        lb->vips[n_vips].health_check = lb_health_check ? true: false;
+
+        size_t i = 0;
+        for (token = strtok_r(tokstr, ",", &save_ptr);
+            token != NULL;
+            token = strtok_r(NULL, ",", &save_ptr)) {
+            char *backend_ip;
+            uint16_t backend_port;
+
+            ip_address_and_port_from_lb_key(token, &backend_ip, &backend_port,
+                                            &addr_family);
+
+            if (!backend_ip) {
+                continue;
+            }
+
+            /* Get the logical port to which this ip belongs to. */
+            struct ovn_port *op = NULL;
+            char *svc_mon_src_ip = NULL;
+            const char *s = smap_get(&nbrec_lb->ip_port_mappings,
+                                     backend_ip);
+            if (s) {
+                char *port_name = xstrdup(s);
+                char *p = strstr(port_name, ":");
+                if (p) {
+                    *p = 0;
+                    p++;
+                    op = ovn_port_find(ports, port_name);
+                    svc_mon_src_ip = xstrdup(p);
+                }
+                free(port_name);
+            }
+
+            lb->vips[n_vips].backends[i].ip = backend_ip;
+            lb->vips[n_vips].backends[i].port = backend_port;
+            lb->vips[n_vips].backends[i].op = op;
+            lb->vips[n_vips].backends[i].svc_mon_src_ip = svc_mon_src_ip;
+
+            if (lb_health_check && op && svc_mon_src_ip) {
+                const char *protocol = nbrec_lb->protocol;
+                if (!protocol || !protocol[0]) {
+                    protocol = "tcp";
+                }
+                lb->vips[n_vips].backends[i].health_check = true;
+                struct service_monitor_info *mon_info =
+                    create_or_get_service_mon(ctx, monitor_map, backend_ip,
+                                              op->nbsp->name, backend_port,
+                                              protocol);
+
+                ovs_assert(mon_info);
+                sbrec_service_monitor_set_options(
+                    mon_info->sbrec_mon, &lb_health_check->options);
+                if (!mon_info->sbrec_mon->src_mac ||
+                    strcmp(mon_info->sbrec_mon->src_mac, svc_monitor_mac)) {
+                    sbrec_service_monitor_set_src_mac(mon_info->sbrec_mon,
+                                                      svc_monitor_mac);
+                }
+
+                if (!mon_info->sbrec_mon->src_ip ||
+                    strcmp(mon_info->sbrec_mon->src_ip, svc_mon_src_ip)) {
+                    sbrec_service_monitor_set_src_ip(mon_info->sbrec_mon,
+                                                     svc_mon_src_ip);
+                }
+
+                lb->vips[n_vips].backends[i].sbrec_monitor =
+                    mon_info->sbrec_mon;
+                mon_info->required = true;
+            } else {
+                lb->vips[n_vips].backends[i].health_check = false;
+            }
+
+            i++;
+        }
+
+        free(tokstr);
+        n_vips++;
+    }
+
+    return lb;
+}
+
+static void
+ovn_lb_destroy(struct ovn_lb *lb)
+{
+    for (size_t i = 0; i < lb->n_vips; i++) {
+        free(lb->vips[i].vip);
+        free(lb->vips[i].backend_ips);
+
+        for (size_t j = 0; j < lb->vips[i].n_backends; j++) {
+            free(lb->vips[i].backends[j].ip);
+            free(lb->vips[i].backends[j].svc_mon_src_ip);
+        }
+
+        free(lb->vips[i].backends);
+    }
+    free(lb->vips);
+}
+
+static void
+build_ovn_lbs(struct northd_context *ctx, struct hmap *ports,
+              struct hmap *lbs)
+{
+    hmap_init(lbs);
+    struct hmap monitor_map = HMAP_INITIALIZER(&monitor_map);
+
+    const struct sbrec_service_monitor *sbrec_mon;
+    SBREC_SERVICE_MONITOR_FOR_EACH (sbrec_mon, ctx->ovnsb_idl) {
+        uint32_t hash = sbrec_mon->port;
+        hash = hash_string(sbrec_mon->ip, hash);
+        hash = hash_string(sbrec_mon->logical_port, hash);
+        struct service_monitor_info *mon_info = xzalloc(sizeof *mon_info);
+        mon_info->sbrec_mon = sbrec_mon;
+        mon_info->required = false;
+        hmap_insert(&monitor_map, &mon_info->hmap_node, hash);
+    }
+
+    const struct nbrec_load_balancer *nbrec_lb;
+    NBREC_LOAD_BALANCER_FOR_EACH (nbrec_lb, ctx->ovnnb_idl) {
+        ovn_lb_create(ctx, lbs, nbrec_lb, ports, &monitor_map);
+    }
+
+    struct service_monitor_info *mon_info;
+    HMAP_FOR_EACH_POP (mon_info, hmap_node, &monitor_map) {
+        if (!mon_info->required) {
+            sbrec_service_monitor_delete(mon_info->sbrec_mon);
+        }
+
+        free(mon_info);
+    }
+    hmap_destroy(&monitor_map);
+}
+
+static void
+destroy_ovn_lbs(struct hmap *lbs)
+{
+    struct ovn_lb *lb;
+    HMAP_FOR_EACH_POP (lb, hmap_node, lbs) {
+        ovn_lb_destroy(lb);
+        free(lb);
     }
 }
 
@@ -3719,28 +4072,6 @@ build_port_security_ip(enum ovn_pipeline pipeline, struct ovn_port *op,
 
 }
 
-/* Returns true if the logical switch port 'enabled' column is empty or
- * set to true.  Otherwise, returns false. */
-static bool
-lsp_is_enabled(const struct nbrec_logical_switch_port *lsp)
-{
-    return !lsp->n_enabled || *lsp->enabled;
-}
-
-/* Returns true only if the logical switch port 'up' column is set to true.
- * Otherwise, if the column is not set or set to false, returns false. */
-static bool
-lsp_is_up(const struct nbrec_logical_switch_port *lsp)
-{
-    return lsp->n_up && *lsp->up;
-}
-
-static bool
-lsp_is_external(const struct nbrec_logical_switch_port *nbsp)
-{
-    return !strcmp(nbsp->type, "external");
-}
-
 static bool
 build_dhcpv4_action(struct ovn_port *op, ovs_be32 offer_ip,
                     struct ds *options_action, struct ds *response_action,
@@ -4295,6 +4626,14 @@ build_pre_lb(struct ovn_datapath *od, struct hmap *lflows,
                   "nd || nd_rs || nd_ra", "next;");
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_LB, 110,
                   "nd || nd_rs || nd_ra", "next;");
+
+    /* Do not send service monitor packets to conntrack. */
+    char *svc_check_match = xasprintf("eth.src == %s", svc_monitor_mac);
+    ovn_lflow_add(lflows, od, S_SWITCH_IN_PRE_LB, 110,
+                  svc_check_match, "next;");
+    ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_LB, 110,
+                  svc_check_match, "next;");
+    free(svc_check_match);
 
     /* Allow all packets to go to next tables by default. */
     ovn_lflow_add(lflows, od, S_SWITCH_IN_PRE_LB, 0, "1", "next;");
@@ -4963,7 +5302,7 @@ build_lb(struct ovn_datapath *od, struct hmap *lflows)
 }
 
 static void
-build_stateful(struct ovn_datapath *od, struct hmap *lflows)
+build_stateful(struct ovn_datapath *od, struct hmap *lflows, struct hmap *lbs)
 {
     /* Ingress and Egress stateful Table (Priority 0): Packets are
      * allowed by default. */
@@ -4997,47 +5336,69 @@ build_stateful(struct ovn_datapath *od, struct hmap *lflows)
      * connection, so it is okay if we do not hit the above match on
      * REGBIT_CONNTRACK_COMMIT. */
     for (int i = 0; i < od->nbs->n_load_balancer; i++) {
-        struct nbrec_load_balancer *lb = od->nbs->load_balancer[i];
-        struct smap *vips = &lb->vips;
-        struct smap_node *node;
+        struct ovn_lb *lb =
+            ovn_lb_find(lbs, &od->nbs->load_balancer[i]->header_.uuid);
+        ovs_assert(lb);
 
-        SMAP_FOR_EACH (node, vips) {
-            uint16_t port = 0;
-            int addr_family;
-
-            /* node->key contains IP:port or just IP. */
-            char *ip_address = NULL;
-            ip_address_and_port_from_lb_key(node->key, &ip_address, &port,
-                                            &addr_family);
-            if (!ip_address) {
-                continue;
-            }
-
+        for (size_t j = 0; j < lb->n_vips; j++) {
+            struct lb_vip *lb_vip = &lb->vips[j];
             /* New connections in Ingress table. */
-            char *action = xasprintf("ct_lb(%s);", node->value);
-            struct ds match = DS_EMPTY_INITIALIZER;
-            if (addr_family == AF_INET) {
-                ds_put_format(&match, "ct.new && ip4.dst == %s", ip_address);
-            } else {
-                ds_put_format(&match, "ct.new && ip6.dst == %s", ip_address);
-            }
-            if (port) {
-                if (lb->protocol && !strcmp(lb->protocol, "udp")) {
-                    ds_put_format(&match, " && udp.dst == %d", port);
+            struct ds action = DS_EMPTY_INITIALIZER;
+            if (lb_vip->health_check) {
+                ds_put_cstr(&action, "ct_lb(");
+
+                size_t n_active_backends = 0;
+                for (size_t k = 0; k < lb_vip->n_backends; k++) {
+                    struct lb_vip_backend *backend = &lb_vip->backends[k];
+                    bool is_up = true;
+                    if (backend->health_check && backend->sbrec_monitor &&
+                        backend->sbrec_monitor->status &&
+                        strcmp(backend->sbrec_monitor->status, "online")) {
+                        is_up = false;
+                    }
+
+                    if (is_up) {
+                        n_active_backends++;
+                        ds_put_format(&action, "%s:%"PRIu16",",
+                        backend->ip, backend->port);
+                    }
+                }
+
+                if (!n_active_backends) {
+                    ds_clear(&action);
+                    ds_put_cstr(&action, "drop;");
                 } else {
-                    ds_put_format(&match, " && tcp.dst == %d", port);
+                    ds_chomp(&action, ',');
+                    ds_put_cstr(&action, ");");
+                }
+            } else {
+                ds_put_format(&action, "ct_lb(%s);", lb_vip->backend_ips);
+            }
+
+            struct ds match = DS_EMPTY_INITIALIZER;
+            if (lb_vip->addr_family == AF_INET) {
+                ds_put_format(&match, "ct.new && ip4.dst == %s", lb_vip->vip);
+            } else {
+                ds_put_format(&match, "ct.new && ip6.dst == %s", lb_vip->vip);
+            }
+            if (lb_vip->vip_port) {
+                if (lb->nlb->protocol && !strcmp(lb->nlb->protocol, "udp")) {
+                    ds_put_format(&match, " && udp.dst == %d",
+                                  lb_vip->vip_port);
+                } else {
+                    ds_put_format(&match, " && tcp.dst == %d",
+                                  lb_vip->vip_port);
                 }
                 ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL,
-                              120, ds_cstr(&match), action);
+                              120, ds_cstr(&match), ds_cstr(&action));
             } else {
                 ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL,
-                              110, ds_cstr(&match), action);
+                              110, ds_cstr(&match), ds_cstr(&action));
             }
 
-            free(ip_address);
             ds_destroy(&match);
-            free(action);
-       }
+            ds_destroy(&action);
+        }
     }
 }
 
@@ -5143,11 +5504,180 @@ build_lrouter_groups(struct hmap *ports, struct ovs_list *lr_list)
     }
 }
 
+/*
+ * Ingress table 17: Flows that flood self originated ARP/ND packets in the
+ * switching domain.
+ */
+static void
+build_lswitch_rport_arp_req_self_orig_flow(struct ovn_port *op,
+                                           uint32_t priority,
+                                           struct ovn_datapath *od,
+                                           struct hmap *lflows)
+{
+    struct ds match = DS_EMPTY_INITIALIZER;
+    struct ds eth_src = DS_EMPTY_INITIALIZER;
+
+    /* Self originated (G)ARP requests/ND need to be flooded as usual.
+     * Determine that packets are self originated by also matching on
+     * source MAC. Matching on ingress port is not reliable in case this
+     * is a VLAN-backed network.
+     * Priority: 80.
+     */
+    ds_put_format(&eth_src, "{ %s, ", op->lrp_networks.ea_s);
+    for (size_t i = 0; i < op->od->nbr->n_nat; i++) {
+        const struct nbrec_nat *nat = op->od->nbr->nat[i];
+
+        if (!nat->external_mac) {
+            continue;
+        }
+
+        ds_put_format(&eth_src, "%s, ", nat->external_mac);
+    }
+    ds_chomp(&eth_src, ' ');
+    ds_chomp(&eth_src, ',');
+    ds_put_cstr(&eth_src, "}");
+
+    ds_put_format(&match, "eth.src == %s && (arp.op == 1 || nd_ns)",
+                  ds_cstr(&eth_src));
+    ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, priority,
+                  ds_cstr(&match),
+                  "outport = \""MC_FLOOD"\"; output;");
+
+    ds_destroy(&match);
+    ds_destroy(&eth_src);
+}
+
+/*
+ * Ingress table 17: Flows that forward ARP/ND requests only to the routers
+ * that own the addresses. Other ARP/ND packets are still flooded in the
+ * switching domain as regular broadcast.
+ */
+static void
+build_lswitch_rport_arp_req_flow_for_ip(struct sset *ips,
+                                        int addr_family,
+                                        struct ovn_port *patch_op,
+                                        struct ovn_datapath *od,
+                                        uint32_t priority,
+                                        struct hmap *lflows)
+{
+    struct ds match   = DS_EMPTY_INITIALIZER;
+    struct ds actions = DS_EMPTY_INITIALIZER;
+
+    /* Packets received from VXLAN tunnels have already been through the
+     * router pipeline so we should skip them. Normally this is done by the
+     * multicast_group implementation (VXLAN packets skip table 32 which
+     * delivers to patch ports) but we're bypassing multicast_groups.
+     */
+    ds_put_cstr(&match, FLAGBIT_NOT_VXLAN " && ");
+
+    if (addr_family == AF_INET) {
+        ds_put_cstr(&match, "arp.op == 1 && arp.tpa == { ");
+    } else {
+        ds_put_cstr(&match, "nd_ns && nd.target == { ");
+    }
+
+    const char *ip_address;
+    SSET_FOR_EACH (ip_address, ips) {
+        ds_put_format(&match, "%s, ", ip_address);
+    }
+
+    ds_chomp(&match, ' ');
+    ds_chomp(&match, ',');
+    ds_put_cstr(&match, "}");
+
+    /* Send a the packet only to the router pipeline and skip flooding it
+     * in the broadcast domain.
+     */
+    ds_put_format(&actions, "outport = %s; output;", patch_op->json_key);
+    ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, priority,
+                  ds_cstr(&match), ds_cstr(&actions));
+
+    ds_destroy(&match);
+    ds_destroy(&actions);
+}
+
+/*
+ * Ingress table 17: Flows that forward ARP/ND requests only to the routers
+ * that own the addresses.
+ * Priorities:
+ * - 80: self originated GARPs that need to follow regular processing.
+ * - 75: ARP requests to router owned IPs (interface IP/LB/NAT).
+ */
+static void
+build_lswitch_rport_arp_req_flows(struct ovn_port *op,
+                                  struct ovn_datapath *sw_od,
+                                  struct ovn_port *sw_op,
+                                  struct hmap *lflows)
+{
+    if (!op || !op->nbrp) {
+        return;
+    }
+
+    if (!lrport_is_enabled(op->nbrp)) {
+        return;
+    }
+
+    /* Self originated (G)ARP requests/ND need to be flooded as usual.
+     * Priority: 80.
+     */
+    build_lswitch_rport_arp_req_self_orig_flow(op, 80, sw_od, lflows);
+
+    /* Forward ARP requests for owned IP addresses (L3, VIP, NAT) only to this
+     * router port.
+     * Priority: 75.
+     */
+    struct sset all_ips_v4 = SSET_INITIALIZER(&all_ips_v4);
+    struct sset all_ips_v6 = SSET_INITIALIZER(&all_ips_v6);
+
+    for (size_t i = 0; i < op->lrp_networks.n_ipv4_addrs; i++) {
+        sset_add(&all_ips_v4, op->lrp_networks.ipv4_addrs[i].addr_s);
+    }
+    for (size_t i = 0; i < op->lrp_networks.n_ipv6_addrs; i++) {
+        sset_add(&all_ips_v6, op->lrp_networks.ipv6_addrs[i].addr_s);
+    }
+
+    get_router_load_balancer_ips(op->od, &all_ips_v4, &all_ips_v6);
+
+    for (size_t i = 0; i < op->od->nbr->n_nat; i++) {
+        const struct nbrec_nat *nat = op->od->nbr->nat[i];
+
+        if (!strcmp(nat->type, "snat")) {
+            continue;
+        }
+
+        ovs_be32 ip;
+        ovs_be32 mask;
+        struct in6_addr ipv6;
+        struct in6_addr mask_v6;
+
+        if (ip_parse_masked(nat->external_ip, &ip, &mask)) {
+            if (!ipv6_parse_masked(nat->external_ip, &ipv6, &mask_v6)) {
+                sset_add(&all_ips_v6, nat->external_ip);
+            }
+        } else {
+            sset_add(&all_ips_v4, nat->external_ip);
+        }
+    }
+
+    if (!sset_is_empty(&all_ips_v4)) {
+        build_lswitch_rport_arp_req_flow_for_ip(&all_ips_v4, AF_INET, sw_op,
+                                                sw_od, 75, lflows);
+    }
+    if (!sset_is_empty(&all_ips_v6)) {
+        build_lswitch_rport_arp_req_flow_for_ip(&all_ips_v6, AF_INET6, sw_op,
+                                                sw_od, 75, lflows);
+    }
+
+    sset_destroy(&all_ips_v4);
+    sset_destroy(&all_ips_v6);
+}
+
 static void
 build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     struct hmap *port_groups, struct hmap *lflows,
                     struct hmap *mcgroups, struct hmap *igmp_groups,
-                    struct shash *meter_groups)
+                    struct shash *meter_groups,
+                    struct hmap *lbs)
 {
     /* This flow table structure is documented in ovn-northd(8), so please
      * update ovn-northd.8.xml if you change anything. */
@@ -5169,7 +5699,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
         build_acls(od, lflows, port_groups);
         build_qos(od, lflows);
         build_lb(od, lflows);
-        build_stateful(od, lflows);
+        build_stateful(od, lflows, lbs);
     }
 
     /* Logical switch ingress table 0: Admission control framework (priority
@@ -5370,6 +5900,46 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
         ovn_lflow_add(lflows, od, S_SWITCH_IN_ARP_ND_RSP, 0, "1", "next;");
     }
+
+    /* Ingress table 11: ARP/ND responder for service monitor source ip.
+     * (priority 110)*/
+    struct ovn_lb *lb;
+    HMAP_FOR_EACH (lb, hmap_node, lbs) {
+        for (size_t i = 0; i < lb->n_vips; i++) {
+            if (!lb->vips[i].health_check) {
+                continue;
+            }
+
+            for (size_t j = 0; j < lb->vips[i].n_backends; j++) {
+                if (!lb->vips[i].backends[j].op ||
+                    !lb->vips[i].backends[j].svc_mon_src_ip) {
+                    continue;
+                }
+
+                ds_clear(&match);
+                ds_put_format(&match, "arp.tpa == %s && arp.op == 1",
+                              lb->vips[i].backends[j].svc_mon_src_ip);
+                ds_clear(&actions);
+                ds_put_format(&actions,
+                    "eth.dst = eth.src; "
+                    "eth.src = %s; "
+                    "arp.op = 2; /* ARP reply */ "
+                    "arp.tha = arp.sha; "
+                    "arp.sha = %s; "
+                    "arp.tpa = arp.spa; "
+                    "arp.spa = %s; "
+                    "outport = inport; "
+                    "flags.loopback = 1; "
+                    "output;",
+                    svc_monitor_mac, svc_monitor_mac,
+                    lb->vips[i].backends[j].svc_mon_src_ip);
+                ovn_lflow_add(lflows, lb->vips[i].backends[j].op->od,
+                              S_SWITCH_IN_ARP_ND_RSP, 110,
+                              ds_cstr(&match), ds_cstr(&actions));
+            }
+        }
+    }
+
 
     /* Logical switch ingress table 12 and 13: DHCP options and response
          * priority 100 flows. */
@@ -5612,12 +6182,16 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
         }
     }
 
+    char *svc_check_match = xasprintf("eth.dst == %s", svc_monitor_mac);
     /* Ingress table 17: Destination lookup, broadcast and multicast handling
      * (priority 70 - 100). */
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (!od->nbs) {
             continue;
         }
+
+        ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 110, svc_check_match,
+                      "handle_svc_check(inport);");
 
         struct mcast_switch_info *mcast_sw_info = &od->mcast_info.sw;
 
@@ -5678,6 +6252,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
         ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 70, "eth.mcast",
                       "outport = \""MC_FLOOD"\"; output;");
     }
+    free(svc_check_match);
 
     /* Ingress table 17: Add IP multicast flows learnt from IGMP
      * (priority 90). */
@@ -5728,6 +6303,14 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
     HMAP_FOR_EACH (op, key_node, ports) {
         if (!op->nbsp || lsp_is_external(op->nbsp)) {
             continue;
+        }
+
+        /* For ports connected to logical routers add flows to bypass the
+         * broadcast flooding of ARP/ND requests in table 17. We direct the
+         * requests only to the router port that owns the IP address.
+         */
+        if (!strcmp(op->nbsp->type, "router")) {
+            build_lswitch_rport_arp_req_flows(op->peer, op->od, op, lflows);
         }
 
         for (size_t i = 0; i < op->nbsp->n_addresses; i++) {
@@ -5859,12 +6442,6 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
     ds_destroy(&match);
     ds_destroy(&actions);
-}
-
-static bool
-lrport_is_enabled(const struct nbrec_logical_router_port *lrport)
-{
-    return !lrport->enabled || *lrport->enabled;
 }
 
 /* Returns a string of the IP address of the router port 'op' that
@@ -6014,9 +6591,12 @@ add_distributed_nat_routes(struct hmap *lflows, const struct ovn_port *op)
     for (size_t i = 0; i < op->od->nbr->n_nat; i++) {
         const struct nbrec_nat *nat = op->od->nbr->nat[i];
         bool found = false;
+        struct eth_addr mac;
 
         if (strcmp(nat->type, "dnat_and_snat") ||
-            !nat->external_mac  || !nat->external_ip) {
+                !nat->external_mac ||
+                !eth_addr_from_string(nat->external_mac, &mac) ||
+                !nat->external_ip || !nat->logical_port) {
             continue;
         }
 
@@ -6031,9 +6611,28 @@ add_distributed_nat_routes(struct hmap *lflows, const struct ovn_port *op)
             continue;
         }
 
+        /* Determine if we need to create IPv4 or IPv6 flows */
+        ovs_be32 ip;
+        struct in6_addr ipv6;
+        int family = AF_INET;
+        if (!ip_parse(nat->external_ip, &ip) || !ip) {
+            family = AF_INET6;
+            if (!ipv6_parse(nat->external_ip, &ipv6)) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+                VLOG_WARN_RL(&rl, "bad ip address %s in nat configuration "
+                             "for router %s", nat->external_ip, op->key);
+                /* We'll create IPv6 flows anyway, but the address
+                 * is probably bogus ... */
+            }
+        }
+
         ds_put_format(&match, "inport == %s && "
-                      "ip4.src == %s && ip4.dst == %s",
-                       op->json_key, nat->logical_ip, nat->external_ip);
+                      "ip%s.src == %s && ip%s.dst == %s",
+                       op->json_key,
+                       family == AF_INET ? "4" : "6",
+                       nat->logical_ip,
+                       family == AF_INET ? "4" : "6",
+                       nat->external_ip);
         ds_put_format(&actions, "outport = %s; eth.dst = %s; "
                       REGBIT_DISTRIBUTED_NAT" = 1; "
                       REGBIT_NAT_REDIRECT" = 0; next;",
@@ -6046,22 +6645,47 @@ add_distributed_nat_routes(struct hmap *lflows, const struct ovn_port *op)
 
         for (size_t j = 0; j < op->od->nbr->n_nat; j++) {
             const struct nbrec_nat *nat2 = op->od->nbr->nat[j];
+            struct eth_addr mac2;
 
             if (nat == nat2 || strcmp(nat2->type, "dnat_and_snat") ||
-                !nat2->external_mac || !nat2->external_ip)
+                    !nat2->external_mac ||
+                    !eth_addr_from_string(nat2->external_mac, &mac2) ||
+                    !nat2->external_ip) {
                 continue;
+            }
+
+            family = AF_INET;
+            if (!ip_parse(nat2->external_ip, &ip) || !ip) {
+                family = AF_INET6;
+                if (!ipv6_parse(nat2->external_ip, &ipv6)) {
+                    static struct vlog_rate_limit rl =
+                        VLOG_RATE_LIMIT_INIT(5, 1);
+                    VLOG_WARN_RL(&rl, "bad ip address %s in nat configuration "
+                                 "for router %s", nat2->external_ip, op->key);
+                    /* We'll create IPv6 flows anyway, but the address
+                     * is probably bogus ... */
+                }
+            }
 
             ds_put_format(&match, "inport == %s && "
-                          "ip4.src == %s && ip4.dst == %s",
-                          op->json_key, nat->logical_ip, nat2->external_ip);
+                          "ip%s.src == %s && ip%s.dst == %s",
+                          op->json_key,
+                          family == AF_INET ? "4" : "6",
+                          nat->logical_ip,
+                          family == AF_INET ? "4" : "6",
+                          nat2->external_ip);
             ds_put_format(&actions, "outport = %s; "
                           "eth.src = %s; eth.dst = %s; "
-                          "reg0 = ip4.dst; reg1 = %s; "
+                          "%sreg0 = ip%s.dst; %sreg1 = %s; "
                           REGBIT_DISTRIBUTED_NAT" = 1; "
                           REGBIT_NAT_REDIRECT" = 0; next;",
                           op->od->l3dgw_port->json_key,
                           op->od->l3dgw_port->lrp_networks.ea_s,
-                          nat2->external_mac, nat->external_ip);
+                          nat2->external_mac,
+                          family == AF_INET ? "" : "xx",
+                          family == AF_INET ? "4" : "6",
+                          family == AF_INET ? "" : "xx",
+                          nat->external_ip);
             ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_ROUTING, 400,
                           ds_cstr(&match), ds_cstr(&actions));
             ds_clear(&match);
@@ -6298,7 +6922,8 @@ op_put_v6_networks(struct ds *ds, const struct ovn_port *op)
 }
 
 static const char *
-get_force_snat_ip(struct ovn_datapath *od, const char *key_type, ovs_be32 *ip)
+get_force_snat_ip(struct ovn_datapath *od, const char *key_type,
+                  struct v46_ip *ip)
 {
     char *key = xasprintf("%s_force_snat_ip", key_type);
     const char *ip_address = smap_get(&od->nbr->options, key);
@@ -6306,19 +6931,27 @@ get_force_snat_ip(struct ovn_datapath *od, const char *key_type, ovs_be32 *ip)
 
     if (ip_address) {
         ovs_be32 mask;
-        char *error = ip_parse_masked(ip_address, ip, &mask);
+        ip->family = AF_INET;
+        char *error = ip_parse_masked(ip_address, &ip->ipv4, &mask);
         if (error || mask != OVS_BE32_MAX) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_WARN_RL(&rl, "bad ip %s in options of router "UUID_FMT"",
-                         ip_address, UUID_ARGS(&od->key));
             free(error);
-            *ip = 0;
-            return NULL;
+            struct in6_addr mask_v6, v6_exact = IN6ADDR_EXACT_INIT;
+            ip->family = AF_INET6;
+            error = ipv6_parse_masked(ip_address, &ip->ipv6, &mask_v6);
+            if (error || memcmp(&mask_v6, &v6_exact, sizeof(mask_v6))) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+                VLOG_WARN_RL(&rl, "bad ip %s in options of router "UUID_FMT"",
+                             ip_address, UUID_ARGS(&od->key));
+                memset(ip, 0, sizeof *ip);
+                ip->family = AF_UNSPEC;
+                return NULL;
+            }
         }
         return ip_address;
     }
 
-    *ip = 0;
+    memset(ip, 0, sizeof *ip);
+    ip->family = AF_UNSPEC;
     return NULL;
 }
 
@@ -6485,10 +7118,31 @@ copy_ra_to_sb(struct ovn_port *op, const char *address_mode)
     smap_add(&options, "ipv6_ra_prefixes", ds_cstr(&s));
     ds_destroy(&s);
 
+    const char *rdnss = smap_get(&op->nbrp->ipv6_ra_configs, "rdnss");
+    if (rdnss) {
+        smap_add(&options, "ipv6_ra_rdnss", rdnss);
+    }
+    const char *dnssl = smap_get(&op->nbrp->ipv6_ra_configs, "dnssl");
+    if (dnssl) {
+        smap_add(&options, "ipv6_ra_dnssl", dnssl);
+    }
+
     smap_add(&options, "ipv6_ra_src_eth", op->lrp_networks.ea_s);
 
     sbrec_port_binding_set_options(op->sb, &options);
     smap_destroy(&options);
+}
+
+static inline bool
+lrouter_nat_is_stateless(const struct nbrec_nat *nat)
+{
+    const char *stateless = smap_get(&nat->options, "stateless");
+
+    if (stateless && !strcmp(stateless, "true")) {
+        return true;
+    }
+
+    return false;
 }
 
 static void
@@ -6816,70 +7470,75 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         }
 
         /* A set to hold all load-balancer vips that need ARP responses. */
-        struct sset all_ips = SSET_INITIALIZER(&all_ips);
-        int addr_family;
-        get_router_load_balancer_ips(op->od, &all_ips, &addr_family);
+        struct sset all_ips_v4 = SSET_INITIALIZER(&all_ips_v4);
+        struct sset all_ips_v6 = SSET_INITIALIZER(&all_ips_v6);
+        get_router_load_balancer_ips(op->od, &all_ips_v4, &all_ips_v6);
 
         const char *ip_address;
-        SSET_FOR_EACH(ip_address, &all_ips) {
+        SSET_FOR_EACH (ip_address, &all_ips_v4) {
             ds_clear(&match);
-            if (addr_family == AF_INET) {
-                ds_put_format(&match,
-                              "inport == %s && arp.tpa == %s && arp.op == 1",
-                              op->json_key, ip_address);
-            } else {
-                ds_put_format(&match,
-                              "inport == %s && nd_ns && nd.target == %s",
-                              op->json_key, ip_address);
-            }
+            ds_put_format(&match,
+                          "inport == %s && arp.tpa == %s && arp.op == 1",
+                          op->json_key, ip_address);
 
             ds_clear(&actions);
-            if (addr_family == AF_INET) {
-                ds_put_format(&actions,
-                "eth.dst = eth.src; "
-                "eth.src = %s; "
-                "arp.op = 2; /* ARP reply */ "
-                "arp.tha = arp.sha; "
-                "arp.sha = %s; "
-                "arp.tpa = arp.spa; "
-                "arp.spa = %s; "
-                "outport = %s; "
-                "flags.loopback = 1; "
-                "output;",
-                op->lrp_networks.ea_s,
-                op->lrp_networks.ea_s,
-                ip_address,
-                op->json_key);
-            } else {
-                ds_put_format(&actions,
-                "nd_na { "
-                "eth.src = %s; "
-                "ip6.src = %s; "
-                "nd.target = %s; "
-                "nd.tll = %s; "
-                "outport = inport; "
-                "flags.loopback = 1; "
-                "output; "
-                "};",
-                op->lrp_networks.ea_s,
-                ip_address,
-                ip_address,
-                op->lrp_networks.ea_s);
-            }
+            ds_put_format(&actions,
+                          "eth.dst = eth.src; "
+                          "eth.src = %s; "
+                          "arp.op = 2; /* ARP reply */ "
+                          "arp.tha = arp.sha; "
+                          "arp.sha = %s; "
+                          "arp.tpa = arp.spa; "
+                          "arp.spa = %s; "
+                          "outport = %s; "
+                          "flags.loopback = 1; "
+                          "output;",
+                          op->lrp_networks.ea_s,
+                          op->lrp_networks.ea_s,
+                          ip_address,
+                          op->json_key);
+
             ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 90,
                           ds_cstr(&match), ds_cstr(&actions));
         }
 
-        sset_destroy(&all_ips);
+        SSET_FOR_EACH (ip_address, &all_ips_v6) {
+            ds_clear(&match);
+            ds_put_format(&match,
+                          "inport == %s && nd_ns && nd.target == %s",
+                          op->json_key, ip_address);
+
+            ds_clear(&actions);
+            ds_put_format(&actions,
+                          "nd_na { "
+                          "eth.src = %s; "
+                          "ip6.src = %s; "
+                          "nd.target = %s; "
+                          "nd.tll = %s; "
+                          "outport = inport; "
+                          "flags.loopback = 1; "
+                          "output; "
+                          "};",
+                          op->lrp_networks.ea_s,
+                          ip_address,
+                          ip_address,
+                          op->lrp_networks.ea_s);
+
+            ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 90,
+                          ds_cstr(&match), ds_cstr(&actions));
+        }
+
+        sset_destroy(&all_ips_v4);
+        sset_destroy(&all_ips_v6);
 
         /* A gateway router can have 2 SNAT IP addresses to force DNATed and
          * LBed traffic respectively to be SNATed.  In addition, there can be
          * a number of SNAT rules in the NAT table. */
-        ovs_be32 *snat_ips = xmalloc(sizeof *snat_ips *
-                                     (op->od->nbr->n_nat + 2));
+        struct v46_ip *snat_ips = xmalloc(sizeof *snat_ips
+                                          * (op->od->nbr->n_nat + 2));
         size_t n_snat_ips = 0;
 
-        ovs_be32 snat_ip;
+        struct v46_ip snat_ip;
         const char *dnat_force_snat_ip = get_force_snat_ip(op->od, "dnat",
                                                            &snat_ip);
         if (dnat_force_snat_ip) {
@@ -6898,44 +7557,85 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             nat = op->od->nbr->nat[i];
 
             ovs_be32 ip;
+            struct in6_addr ipv6;
+            bool is_v6 = false;
             if (!ip_parse(nat->external_ip, &ip) || !ip) {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-                VLOG_WARN_RL(&rl, "bad ip address %s in nat configuration "
-                             "for router %s", nat->external_ip, op->key);
-                continue;
+                if (!ipv6_parse(nat->external_ip, &ipv6)) {
+                    static struct vlog_rate_limit rl =
+                        VLOG_RATE_LIMIT_INIT(5, 1);
+                    VLOG_WARN_RL(&rl, "bad ip address %s in nat configuration "
+                                 "for router %s", nat->external_ip, op->key);
+                    continue;
+                }
+                is_v6 = true;
             }
 
             if (!strcmp(nat->type, "snat")) {
-                snat_ips[n_snat_ips++] = ip;
+                if (is_v6) {
+                    snat_ips[n_snat_ips].family = AF_INET6;
+                    snat_ips[n_snat_ips++].ipv6 = ipv6;
+                } else {
+                    snat_ips[n_snat_ips].family = AF_INET;
+                    snat_ips[n_snat_ips++].ipv4 = ip;
+                }
                 continue;
             }
 
-            /* ARP handling for external IP addresses.
+            /* ARP / ND handling for external IP addresses.
              *
              * DNAT IP addresses are external IP addresses that need ARP
              * handling. */
+            char addr_s[INET6_ADDRSTRLEN + 1];
             ds_clear(&match);
-            ds_put_format(&match,
-                          "inport == %s && arp.tpa == "IP_FMT" && arp.op == 1",
-                          op->json_key, IP_ARGS(ip));
-
             ds_clear(&actions);
-            ds_put_format(&actions,
-                "eth.dst = eth.src; "
-                "arp.op = 2; /* ARP reply */ "
-                "arp.tha = arp.sha; ");
+            if (is_v6) {
+                /* For ND solicitations, we need to listen for both the
+                 * unicast IPv6 address and its all-nodes multicast address,
+                 * but always respond with the unicast IPv6 address. */
+                char sn_addr_s[INET6_ADDRSTRLEN + 1];
+                struct in6_addr sn_addr;
+                in6_addr_solicited_node(&sn_addr, &ipv6);
+                ipv6_string_mapped(sn_addr_s, &sn_addr);
+                ipv6_string_mapped(addr_s, &ipv6);
 
+                ds_put_format(&match, "inport == %s && "
+                        "nd_ns && ip6.dst == {%s, %s} && nd.target == %s",
+                        op->json_key, addr_s, sn_addr_s, addr_s);
+
+                ds_put_format(&actions,
+                    "eth.dst = eth.src; "
+                    "nd_na { ");
+            } else {
+                ds_put_format(&match,
+                              "inport == %s "
+                              "&& arp.tpa == "IP_FMT" && arp.op == 1",
+                              op->json_key, IP_ARGS(ip));
+
+                ds_put_format(&actions,
+                    "eth.dst = eth.src; "
+                    "arp.op = 2; /* ARP reply */ "
+                    "arp.tha = arp.sha; ");
+            }
             if (op->od->l3dgw_port && op == op->od->l3dgw_port) {
                 struct eth_addr mac;
                 if (nat->external_mac &&
                     eth_addr_from_string(nat->external_mac, &mac)
                     && nat->logical_port) {
                     /* distributed NAT case, use nat->external_mac */
-                    ds_put_format(&actions,
-                        "eth.src = "ETH_ADDR_FMT"; "
-                        "arp.sha = "ETH_ADDR_FMT"; ",
-                        ETH_ADDR_ARGS(mac),
-                        ETH_ADDR_ARGS(mac));
+                    if (is_v6) {
+                        ds_put_format(&actions,
+                            "eth.src = "ETH_ADDR_FMT"; "
+                            "nd.tll = "ETH_ADDR_FMT"; ",
+                            ETH_ADDR_ARGS(mac),
+                            ETH_ADDR_ARGS(mac));
+
+                    } else {
+                        ds_put_format(&actions,
+                            "eth.src = "ETH_ADDR_FMT"; "
+                            "arp.sha = "ETH_ADDR_FMT"; ",
+                            ETH_ADDR_ARGS(mac),
+                            ETH_ADDR_ARGS(mac));
+                    }
                     /* Traffic with eth.src = nat->external_mac should only be
                      * sent from the chassis where nat->logical_port is
                      * resident, so that upstream MAC learning points to the
@@ -6944,11 +7644,20 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                     ds_put_format(&match, " && is_chassis_resident(\"%s\")",
                                   nat->logical_port);
                 } else {
-                    ds_put_format(&actions,
-                        "eth.src = %s; "
-                        "arp.sha = %s; ",
-                        op->lrp_networks.ea_s,
-                        op->lrp_networks.ea_s);
+                    if (is_v6) {
+                        ds_put_format(&actions,
+                            "eth.src = %s; "
+                            "nd.tll = %s; ",
+                            op->lrp_networks.ea_s,
+                            op->lrp_networks.ea_s);
+
+                    } else {
+                        ds_put_format(&actions,
+                            "eth.src = %s; "
+                            "arp.sha = %s; ",
+                            op->lrp_networks.ea_s,
+                            op->lrp_networks.ea_s);
+                    }
                     /* Traffic with eth.src = l3dgw_port->lrp_networks.ea_s
                      * should only be sent from the "redirect-chassis", so that
                      * upstream MAC learning points to the "redirect-chassis".
@@ -6960,20 +7669,39 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                     }
                 }
             } else {
-                ds_put_format(&actions,
-                    "eth.src = %s; "
-                    "arp.sha = %s; ",
-                    op->lrp_networks.ea_s,
-                    op->lrp_networks.ea_s);
+                if (is_v6) {
+                    ds_put_format(&actions,
+                        "eth.src = %s; "
+                        "nd.tll = %s; ",
+                        op->lrp_networks.ea_s,
+                        op->lrp_networks.ea_s);
+                } else {
+                    ds_put_format(&actions,
+                        "eth.src = %s; "
+                        "arp.sha = %s; ",
+                        op->lrp_networks.ea_s,
+                        op->lrp_networks.ea_s);
+                }
             }
-            ds_put_format(&actions,
-                "arp.tpa = arp.spa; "
-                "arp.spa = "IP_FMT"; "
-                "outport = %s; "
-                "flags.loopback = 1; "
-                "output;",
-                IP_ARGS(ip),
-                op->json_key);
+            if (is_v6) {
+                ds_put_format(&actions,
+                    "ip6.src = %s; "
+                    "nd.target = %s; "
+                    "outport = %s; "
+                    "flags.loopback = 1; "
+                    "output; "
+                    "};",
+                    addr_s, addr_s, op->json_key);
+            } else {
+                ds_put_format(&actions,
+                    "arp.tpa = arp.spa; "
+                    "arp.spa = "IP_FMT"; "
+                    "outport = %s; "
+                    "flags.loopback = 1; "
+                    "output;",
+                    IP_ARGS(ip),
+                    op->json_key);
+            }
             ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 90,
                           ds_cstr(&match), ds_cstr(&actions));
         }
@@ -7030,9 +7758,11 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             bool snat_ip_is_router_ip = false;
             for (int j = 0; j < n_snat_ips; j++) {
                 /* Packets to SNAT IPs should not be dropped. */
-                if (op->lrp_networks.ipv4_addrs[i].addr == snat_ips[j]) {
-                    snat_ip_is_router_ip = true;
-                    break;
+                if (snat_ips[j].family == AF_INET
+                    && op->lrp_networks.ipv4_addrs[i].addr
+                       == snat_ips[j].ipv4) {
+                        snat_ip_is_router_ip = true;
+                        break;
                 }
             }
             if (snat_ip_is_router_ip) {
@@ -7042,6 +7772,34 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                           op->lrp_networks.ipv4_addrs[i].addr_s);
             has_drop_ips = true;
         }
+        if (has_drop_ips) {
+            ds_chomp(&match, ' ');
+            ds_chomp(&match, ',');
+            ds_put_cstr(&match, "} || ip6.dst == {");
+        } else {
+            ds_clear(&match);
+            ds_put_cstr(&match, "ip6.dst == {");
+        }
+
+        for (int i = 0; i < op->lrp_networks.n_ipv6_addrs; i++) {
+            bool snat_ip_is_router_ip = false;
+            for (int j = 0; j < n_snat_ips; j++) {
+                /* Packets to SNAT IPs should not be dropped. */
+                if (snat_ips[j].family == AF_INET6
+                    && !memcmp(&op->lrp_networks.ipv6_addrs[i].addr,
+                               &snat_ips[j].ipv6, sizeof snat_ips[j].ipv6)) {
+                    snat_ip_is_router_ip = true;
+                    break;
+                }
+            }
+            if (snat_ip_is_router_ip) {
+                continue;
+            }
+            ds_put_format(&match, "%s, ",
+                          op->lrp_networks.ipv6_addrs[i].addr_s);
+            has_drop_ips = true;
+        }
+
         ds_chomp(&match, ' ');
         ds_chomp(&match, ',');
         ds_put_cstr(&match, "}");
@@ -7055,7 +7813,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         free(snat_ips);
     }
 
-    /* Logical router ingress table 1: IP Input for IPv6. */
+    /* Logical router ingress table 3: IP Input for IPv6. */
     HMAP_FOR_EACH (op, key_node, ports) {
         if (!op->nbrp) {
             continue;
@@ -7068,14 +7826,6 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         }
 
         if (op->lrp_networks.n_ipv6_addrs) {
-            /* L3 admission control: drop packets that originate from an
-             * IPv6 address owned by the router (priority 100). */
-            ds_clear(&match);
-            ds_put_cstr(&match, "ip6.src == ");
-            op_put_v6_networks(&match, op);
-            ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 100,
-                          ds_cstr(&match), "drop;");
-
             /* ICMPv6 echo reply.  These flows reply to echo requests
              * received for the router's IP address. */
             ds_clear(&match);
@@ -7092,13 +7842,6 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                         "next; ");
             ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 90,
                           ds_cstr(&match), ds_cstr(&actions));
-
-            /* Drop IPv6 traffic to this router. */
-            ds_clear(&match);
-            ds_put_cstr(&match, "ip6.dst == ");
-            op_put_v6_networks(&match, op);
-            ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 60,
-                          ds_cstr(&match), "drop;");
         }
 
         /* ND reply.  These flows reply to ND solicitations for the
@@ -7240,11 +7983,11 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             continue;
         }
 
-        ovs_be32 snat_ip;
+        struct v46_ip snat_ip, lb_snat_ip;
         const char *dnat_force_snat_ip = get_force_snat_ip(od, "dnat",
                                                            &snat_ip);
         const char *lb_force_snat_ip = get_force_snat_ip(od, "lb",
-                                                         &snat_ip);
+                                                         &lb_snat_ip);
 
         for (int i = 0; i < od->nbr->n_nat; i++) {
             const struct nbrec_nat *nat;
@@ -7252,21 +7995,39 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             nat = od->nbr->nat[i];
 
             ovs_be32 ip, mask;
+            struct in6_addr ipv6, mask_v6, v6_exact = IN6ADDR_EXACT_INIT;
+            bool is_v6 = false;
+            bool stateless = lrouter_nat_is_stateless(nat);
 
             char *error = ip_parse_masked(nat->external_ip, &ip, &mask);
             if (error || mask != OVS_BE32_MAX) {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-                VLOG_WARN_RL(&rl, "bad external ip %s for nat",
-                             nat->external_ip);
                 free(error);
-                continue;
+                error = ipv6_parse_masked(nat->external_ip, &ipv6, &mask_v6);
+                if (error || memcmp(&mask_v6, &v6_exact, sizeof(mask_v6))) {
+                    /* Invalid for both IPv4 and IPv6 */
+                    static struct vlog_rate_limit rl =
+                        VLOG_RATE_LIMIT_INIT(5, 1);
+                    VLOG_WARN_RL(&rl, "bad external ip %s for nat",
+                                 nat->external_ip);
+                    free(error);
+                    continue;
+                }
+                /* It was an invalid IPv4 address, but valid IPv6.
+                 * Treat the rest of the handling of this NAT rule
+                 * as IPv6. */
+                is_v6 = true;
             }
 
             /* Check the validity of nat->logical_ip. 'logical_ip' can
              * be a subnet when the type is "snat". */
-            error = ip_parse_masked(nat->logical_ip, &ip, &mask);
+            if (is_v6) {
+                error = ipv6_parse_masked(nat->external_ip, &ipv6, &mask_v6);
+            } else {
+                error = ip_parse_masked(nat->logical_ip, &ip, &mask);
+            }
             if (!strcmp(nat->type, "snat")) {
                 if (error) {
+                    /* Invalid for both IPv4 and IPv6 */
                     static struct vlog_rate_limit rl =
                         VLOG_RATE_LIMIT_INIT(5, 1);
                     VLOG_WARN_RL(&rl, "bad ip network or ip %s for snat "
@@ -7276,7 +8037,10 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                     continue;
                 }
             } else {
-                if (error || mask != OVS_BE32_MAX) {
+                if (error || (!is_v6 && mask != OVS_BE32_MAX)
+                    || (is_v6 && memcmp(&mask_v6, &v6_exact,
+                                        sizeof mask_v6))) {
+                    /* Invalid for both IPv4 and IPv6 */
                     static struct vlog_rate_limit rl =
                         VLOG_RATE_LIMIT_INIT(5, 1);
                     VLOG_WARN_RL(&rl, "bad ip %s for dnat in router "
@@ -7317,17 +8081,28 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                 if (!od->l3dgw_port) {
                     /* Gateway router. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.dst == %s",
+                    ds_clear(&actions);
+                    ds_put_format(&match, "ip && ip%s.dst == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->external_ip);
+                    if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                       ds_put_format(&actions, "ip%s.dst=%s; next;",
+                                     is_v6 ? "6" : "4", nat->logical_ip);
+                    } else {
+                       ds_put_cstr(&actions, "ct_snat;");
+                    }
+
                     ovn_lflow_add(lflows, od, S_ROUTER_IN_UNSNAT, 90,
-                                  ds_cstr(&match), "ct_snat;");
+                                  ds_cstr(&match), ds_cstr(&actions));
                 } else {
                     /* Distributed router. */
 
                     /* Traffic received on l3dgw_port is subject to NAT. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.dst == %s"
+                    ds_clear(&actions);
+                    ds_put_format(&match, "ip && ip%s.dst == %s"
                                           " && inport == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->external_ip,
                                   od->l3dgw_port->json_key);
                     if (!distributed && od->l3redirect_port) {
@@ -7336,14 +8111,23 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                         ds_put_format(&match, " && is_chassis_resident(%s)",
                                       od->l3redirect_port->json_key);
                     }
+
+                    if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                        ds_put_format(&actions, "ip%s.dst=%s; next;",
+                                      is_v6 ? "6" : "4", nat->logical_ip);
+                    } else {
+                        ds_put_cstr(&actions, "ct_snat;");
+                    }
+
                     ovn_lflow_add(lflows, od, S_ROUTER_IN_UNSNAT, 100,
-                                  ds_cstr(&match), "ct_snat;");
+                                  ds_cstr(&match), ds_cstr(&actions));
 
                     /* Traffic received on other router ports must be
                      * redirected to the central instance of the l3dgw_port
                      * for NAT processing. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.dst == %s",
+                    ds_put_format(&match, "ip && ip%s.dst == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->external_ip);
                     ovn_lflow_add(lflows, od, S_ROUTER_IN_UNSNAT, 50,
                                   ds_cstr(&match),
@@ -7362,7 +8146,8 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                      * We need to set flags.loopback because the router can
                      * send the packet back through the same interface. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.dst == %s",
+                    ds_put_format(&match, "ip && ip%s.dst == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->external_ip);
                     ds_clear(&actions);
                     if (dnat_force_snat_ip) {
@@ -7372,8 +8157,16 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                         ds_put_format(&actions,
                                       "flags.force_snat_for_dnat = 1; ");
                     }
-                    ds_put_format(&actions, "flags.loopback = 1; ct_dnat(%s);",
-                                  nat->logical_ip);
+
+                    if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                        ds_put_format(&actions, "flags.loopback = 1; "
+                                      "ip%s.dst=%s; next;",
+                                      is_v6 ? "6" : "4", nat->logical_ip);
+                    } else {
+                        ds_put_format(&actions, "flags.loopback = 1; "
+                                      "ct_dnat(%s);", nat->logical_ip);
+                    }
+
                     ovn_lflow_add(lflows, od, S_ROUTER_IN_DNAT, 100,
                                   ds_cstr(&match), ds_cstr(&actions));
                 } else {
@@ -7381,8 +8174,9 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
 
                     /* Traffic received on l3dgw_port is subject to NAT. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.dst == %s"
+                    ds_put_format(&match, "ip && ip%s.dst == %s"
                                           " && inport == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->external_ip,
                                   od->l3dgw_port->json_key);
                     if (!distributed && od->l3redirect_port) {
@@ -7392,8 +8186,15 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                                       od->l3redirect_port->json_key);
                     }
                     ds_clear(&actions);
-                    ds_put_format(&actions, "ct_dnat(%s);",
-                                  nat->logical_ip);
+
+                    if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                        ds_put_format(&actions, "ip%s.dst=%s; next;",
+                                      is_v6 ? "6" : "4", nat->logical_ip);
+                    } else {
+                        ds_put_format(&actions, "ct_dnat(%s);",
+                                      nat->logical_ip);
+                    }
+
                     ovn_lflow_add(lflows, od, S_ROUTER_IN_DNAT, 100,
                                   ds_cstr(&match), ds_cstr(&actions));
 
@@ -7401,7 +8202,8 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                      * redirected to the central instance of the l3dgw_port
                      * for NAT processing. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.dst == %s",
+                    ds_put_format(&match, "ip && ip%s.dst == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->external_ip);
                     ovn_lflow_add(lflows, od, S_ROUTER_IN_DNAT, 50,
                                   ds_cstr(&match),
@@ -7420,8 +8222,9 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             if (od->l3dgw_port && (!strcmp(nat->type, "dnat")
                 || !strcmp(nat->type, "dnat_and_snat"))) {
                 ds_clear(&match);
-                ds_put_format(&match, "ip && ip4.src == %s"
+                ds_put_format(&match, "ip && ip%s.src == %s"
                                       " && outport == %s",
+                              is_v6 ? "6" : "4",
                               nat->logical_ip,
                               od->l3dgw_port->json_key);
                 if (!distributed && od->l3redirect_port) {
@@ -7435,7 +8238,14 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                     ds_put_format(&actions, "eth.src = "ETH_ADDR_FMT"; ",
                                   ETH_ADDR_ARGS(mac));
                 }
-                ds_put_format(&actions, "ct_dnat;");
+
+                if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                    ds_put_format(&actions, "ip%s.src=%s; next;",
+                                  is_v6 ? "6" : "4", nat->external_ip);
+                } else {
+                    ds_put_format(&actions, "ct_dnat;");
+                }
+
                 ovn_lflow_add(lflows, od, S_ROUTER_OUT_UNDNAT, 100,
                               ds_cstr(&match), ds_cstr(&actions));
             }
@@ -7448,10 +8258,18 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                 if (!od->l3dgw_port) {
                     /* Gateway router. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.src == %s",
+                    ds_put_format(&match, "ip && ip%s.src == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->logical_ip);
                     ds_clear(&actions);
-                    ds_put_format(&actions, "ct_snat(%s);", nat->external_ip);
+
+                    if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                        ds_put_format(&actions, "ip%s.src=%s; next;",
+                                      is_v6 ? "6" : "4", nat->external_ip);
+                    } else {
+                        ds_put_format(&actions, "ct_snat(%s);",
+                                      nat->external_ip);
+                    }
 
                     /* The priority here is calculated such that the
                      * nat->logical_ip with the longest mask gets a higher
@@ -7464,8 +8282,9 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
 
                     /* Distributed router. */
                     ds_clear(&match);
-                    ds_put_format(&match, "ip && ip4.src == %s"
+                    ds_put_format(&match, "ip && ip%s.src == %s"
                                           " && outport == %s",
+                                  is_v6 ? "6" : "4",
                                   nat->logical_ip,
                                   od->l3dgw_port->json_key);
                     if (!distributed && od->l3redirect_port) {
@@ -7480,7 +8299,14 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                         ds_put_format(&actions, "eth.src = "ETH_ADDR_FMT"; ",
                                       ETH_ADDR_ARGS(mac));
                     }
-                    ds_put_format(&actions, "ct_snat(%s);", nat->external_ip);
+
+                    if (!strcmp(nat->type, "dnat_and_snat") && stateless) {
+                        ds_put_format(&actions, "ip%s.src=%s; next;",
+                                      is_v6 ? "6" : "4", nat->external_ip);
+                    } else {
+                        ds_put_format(&actions, "ct_snat(%s);",
+                                      nat->external_ip);
+                    }
 
                     /* The priority here is calculated such that the
                      * nat->logical_ip with the longest mask gets a higher
@@ -7514,7 +8340,8 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
              * can be applied in a distributed manner. */
             if (distributed) {
                 ds_clear(&match);
-                ds_put_format(&match, "ip4.src == %s && outport == %s",
+                ds_put_format(&match, "ip%s.src == %s && outport == %s",
+                              is_v6 ? "6" : "4",
                               nat->logical_ip,
                               od->l3dgw_port->json_key);
                 ovn_lflow_add(lflows, od, S_ROUTER_IN_GW_REDIRECT, 100,
@@ -7529,7 +8356,8 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             if (od->l3dgw_port) {
                 /* Distributed router. */
                 if (!strcmp(nat->type, "dnat_and_snat") &&
-                    nat->external_mac && nat->external_ip) {
+                        nat->external_mac && nat->external_ip &&
+                        eth_addr_from_string(nat->external_mac, &mac)) {
                     for (int j = 0; j < od->nbr->n_nat; j++) {
                         const struct nbrec_nat *nat2 = od->nbr->nat[j];
 
@@ -7541,9 +8369,10 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
 
                         ds_clear(&match);
                         ds_put_format(&match, "is_chassis_resident(\"%s\") && "
-                                      "ip4.src == %s && ip4.dst == %s",
-                                      nat->logical_port, nat2->external_ip,
-                                      nat->external_ip);
+                                      "ip%s.src == %s && ip%s.dst == %s",
+                                      nat->logical_port,
+                                      is_v6 ? "6" : "4", nat2->external_ip,
+                                      is_v6 ? "6" : "4", nat->external_ip);
                         ds_clear(&actions);
                         ds_put_format(&actions,
                                       "inport = outport; outport = \"\"; "
@@ -7555,8 +8384,9 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
 
                         ds_clear(&match);
                         ds_put_format(&match,
-                                      "ip4.src == %s && ip4.dst == %s",
-                                      nat2->external_ip, nat->external_ip);
+                                      "ip%s.src == %s && ip%s.dst == %s",
+                                      is_v6 ? "6" : "4", nat2->external_ip,
+                                      is_v6 ? "6" : "4", nat->external_ip);
                         ovn_lflow_add(lflows, od, S_ROUTER_OUT_EGR_LOOP, 200,
                                       ds_cstr(&match), "next;");
                         ds_clear(&match);
@@ -7564,7 +8394,8 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                 }
 
                 ds_clear(&match);
-                ds_put_format(&match, "ip4.dst == %s && outport == %s",
+                ds_put_format(&match, "ip%s.dst == %s && outport == %s",
+                              is_v6 ? "6" : "4",
                               nat->external_ip,
                               od->l3dgw_port->json_key);
                 ds_clear(&actions);
@@ -7588,7 +8419,9 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
              * gateway router (as set in options:dnat_force_snat_ip) is seen,
              * UNSNAT it. */
             ds_clear(&match);
-            ds_put_format(&match, "ip && ip4.dst == %s", dnat_force_snat_ip);
+            ds_put_format(&match, "ip && ip%s.dst == %s",
+                          snat_ip.family == AF_INET ? "4" : "6",
+                          dnat_force_snat_ip);
             ovn_lflow_add(lflows, od, S_ROUTER_IN_UNSNAT, 110,
                           ds_cstr(&match), "ct_snat;");
 
@@ -7607,7 +8440,9 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
              * gateway router (as set in options:lb_force_snat_ip) is seen,
              * UNSNAT it. */
             ds_clear(&match);
-            ds_put_format(&match, "ip && ip4.dst == %s", lb_force_snat_ip);
+            ds_put_format(&match, "ip && ip%s.dst == %s",
+                          lb_snat_ip.family == AF_INET ? "4" : "6",
+                          lb_force_snat_ip);
             ovn_lflow_add(lflows, od, S_ROUTER_IN_UNSNAT, 100,
                           ds_cstr(&match), "ct_snat;");
 
@@ -7709,7 +8544,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                     if (addr_family == AF_INET) {
                         ds_put_format(&match, "ip && ip4.dst == %s",
                                       ip_address);
-                    } else {
+                    } else if (addr_family == AF_INET6) {
                         ds_put_format(&match, "ip && ip6.dst == %s",
                                       ip_address);
                     }
@@ -7729,7 +8564,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                 if (addr_family == AF_INET) {
                     ds_put_format(&match, "ip && ip4.dst == %s",
                                 ip_address);
-                } else {
+                } else if (addr_family == AF_INET6) {
                     ds_put_format(&match, "ip && ip6.dst == %s",
                                 ip_address);
                 }
@@ -8557,12 +9392,13 @@ static void
 build_lflows(struct northd_context *ctx, struct hmap *datapaths,
              struct hmap *ports, struct hmap *port_groups,
              struct hmap *mcgroups, struct hmap *igmp_groups,
-             struct shash *meter_groups)
+             struct shash *meter_groups,
+             struct hmap *lbs)
 {
     struct hmap lflows = HMAP_INITIALIZER(&lflows);
 
     build_lswitch_flows(datapaths, ports, port_groups, &lflows, mcgroups,
-                        igmp_groups, meter_groups);
+                        igmp_groups, meter_groups, lbs);
     build_lrouter_flows(datapaths, ports, &lflows, meter_groups);
 
     /* Push changes to the Logical_Flow table to database. */
@@ -9279,9 +10115,11 @@ ovnnb_db_run(struct northd_context *ctx,
     struct hmap mcast_groups;
     struct hmap igmp_groups;
     struct shash meter_groups = SHASH_INITIALIZER(&meter_groups);
+    struct hmap lbs;
 
     build_datapaths(ctx, datapaths, lr_list);
     build_ports(ctx, sbrec_chassis_by_name, datapaths, ports);
+    build_ovn_lbs(ctx, ports, &lbs);
     build_ipam(datapaths, ports);
     build_port_group_lswitches(ctx, &port_groups, ports);
     build_lrouter_groups(ports, lr_list);
@@ -9289,12 +10127,14 @@ ovnnb_db_run(struct northd_context *ctx,
     build_mcast_groups(ctx, datapaths, ports, &mcast_groups, &igmp_groups);
     build_meter_groups(ctx, &meter_groups);
     build_lflows(ctx, datapaths, ports, &port_groups, &mcast_groups,
-                 &igmp_groups, &meter_groups);
+                 &igmp_groups, &meter_groups, &lbs);
 
     sync_address_sets(ctx);
     sync_port_groups(ctx);
     sync_meters(ctx);
     sync_dns_entries(ctx, datapaths);
+    destroy_ovn_lbs(&lbs);
+    hmap_destroy(&lbs);
 
     struct ovn_igmp_group *igmp_group, *next_igmp_group;
 
@@ -9343,16 +10183,43 @@ ovnnb_db_run(struct northd_context *ctx,
                      &addr.ea[0], &addr.ea[1], &addr.ea[2])) {
             mac_prefix = addr;
         }
-    } else {
+    }
+
+    const char *monitor_mac = smap_get(&nb->options, "svc_monitor_mac");
+    if (monitor_mac) {
+        struct eth_addr addr;
+
+        memset(&addr, 0, sizeof addr);
+        if (eth_addr_from_string(monitor_mac, &addr)) {
+            snprintf(svc_monitor_mac, sizeof svc_monitor_mac,
+                     ETH_ADDR_FMT, ETH_ADDR_ARGS(addr));
+        } else {
+            monitor_mac = NULL;
+        }
+    }
+
+    if (!mac_addr_prefix || !monitor_mac) {
         struct smap options;
-
         smap_clone(&options, &nb->options);
-        eth_addr_random(&mac_prefix);
-        memset(&mac_prefix.ea[3], 0, 3);
 
-        smap_add_format(&options, "mac_prefix",
-                        "%02"PRIx8":%02"PRIx8":%02"PRIx8,
-                        mac_prefix.ea[0], mac_prefix.ea[1], mac_prefix.ea[2]);
+        if (!mac_addr_prefix) {
+            eth_addr_random(&mac_prefix);
+            memset(&mac_prefix.ea[3], 0, 3);
+
+            smap_add_format(&options, "mac_prefix",
+                            "%02"PRIx8":%02"PRIx8":%02"PRIx8,
+                            mac_prefix.ea[0], mac_prefix.ea[1],
+                            mac_prefix.ea[2]);
+        }
+
+        if (!monitor_mac) {
+            struct eth_addr addr;
+            eth_addr_random(&addr);
+            snprintf(svc_monitor_mac, sizeof svc_monitor_mac,
+                     ETH_ADDR_FMT, ETH_ADDR_ARGS(addr));
+            smap_replace(&options, "svc_monitor_mac", svc_monitor_mac);
+        }
+
         nbrec_nb_global_verify_options(nb);
         nbrec_nb_global_set_options(nb, &options);
 
@@ -9640,6 +10507,11 @@ static const char *rbac_mac_binding_auth[] =
 static const char *rbac_mac_binding_update[] =
     {"logical_port", "ip", "mac", "datapath"};
 
+static const char *rbac_svc_monitor_auth[] =
+    {""};
+static const char *rbac_svc_monitor_auth_update[] =
+    {"status"};
+
 static struct rbac_perm_cfg {
     const char *table;
     const char **auth;
@@ -9680,6 +10552,14 @@ static struct rbac_perm_cfg {
         .insdel = true,
         .update = rbac_mac_binding_update,
         .n_update = ARRAY_SIZE(rbac_mac_binding_update),
+        .row = NULL
+    },{
+        .table = "Service_Monitor",
+        .auth = rbac_svc_monitor_auth,
+        .n_auth = ARRAY_SIZE(rbac_svc_monitor_auth),
+        .insdel = false,
+        .update = rbac_svc_monitor_auth_update,
+        .n_update = ARRAY_SIZE(rbac_svc_monitor_auth_update),
         .row = NULL
     },{
         .table = NULL,
@@ -10152,6 +11032,25 @@ main(int argc, char *argv[])
                        &sbrec_ip_multicast_col_query_interval);
     add_column_noalert(ovnsb_idl_loop.idl,
                        &sbrec_ip_multicast_col_query_max_resp);
+    ovsdb_idl_add_table(ovnsb_idl_loop.idl, &sbrec_table_service_monitor);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_ip);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_logical_port);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_port);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_options);
+    ovsdb_idl_add_column(ovnsb_idl_loop.idl,
+                         &sbrec_service_monitor_col_status);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_protocol);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_src_mac);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_src_ip);
+    add_column_noalert(ovnsb_idl_loop.idl,
+                       &sbrec_service_monitor_col_external_ids);
 
     struct ovsdb_idl_index *sbrec_chassis_by_name
         = chassis_index_create(ovnsb_idl_loop.idl);

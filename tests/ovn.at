@@ -589,22 +589,6 @@ ip,reg14=0x6
 ipv6,reg14=0x5
 ipv6,reg14=0x6
 ])
-AT_CHECK([expr_to_flow 'inport == {"eth0", "eth1", "eth2"} && ip4 && tcp && tcp.dst == {500, 501}'], [0], [dnl
-tcp,reg14=0x5,tp_dst=500
-tcp,reg14=0x5,tp_dst=501
-tcp,reg14=0x6,tp_dst=500
-tcp,reg14=0x6,tp_dst=501
-])
-AT_CHECK([expr_to_flow 'outport == {"eth0", "eth1", "eth2"} && ip4 && tcp && tcp.src == {400, 401} && tcp.dst == {500, 501}'], [0], [dnl
-tcp,reg15=0x5,tp_src=400,tp_dst=500
-tcp,reg15=0x5,tp_src=400,tp_dst=501
-tcp,reg15=0x5,tp_src=401,tp_dst=500
-tcp,reg15=0x5,tp_src=401,tp_dst=501
-tcp,reg15=0x6,tp_src=400,tp_dst=500
-tcp,reg15=0x6,tp_src=400,tp_dst=501
-tcp,reg15=0x6,tp_src=401,tp_dst=500
-tcp,reg15=0x6,tp_src=401,tp_dst=501
-])
 AT_CHECK([expr_to_flow 'inport == "eth0" && inport == "eth1"'], [0], [dnl
 (no flows)
 ])
@@ -709,14 +693,6 @@ reg15=0x11
 reg15=0x12
 reg15=0x13
 ])
-AT_CHECK([expr_to_flow 'outport == @pg1 && ip4.src == {10.0.0.4, 10.0.0.5}'], [0], [dnl
-ip,reg15=0x11,nw_src=10.0.0.4
-ip,reg15=0x11,nw_src=10.0.0.5
-ip,reg15=0x12,nw_src=10.0.0.4
-ip,reg15=0x12,nw_src=10.0.0.5
-ip,reg15=0x13,nw_src=10.0.0.4
-ip,reg15=0x13,nw_src=10.0.0.5
-])
 AT_CHECK([expr_to_flow 'outport == {@pg_empty}'], [0], [dnl
 (no flows)
 ])
@@ -725,27 +701,22 @@ reg15=0x11
 ])
 AT_CLEANUP
 
-AT_SETUP([ovn -- converting expressions to flows -- no conjunction])
-AT_KEYWORDS([no conjunction])
+AT_SETUP([ovn -- converting expressions to flows -- conjunction])
+AT_KEYWORDS([conjunction])
 expr_to_flow () {
     echo "$1" | ovstest test-ovn expr-to-flows | sort
 }
 
-# conjunction is disabled in OVN until some of the issues
-# related to conjunction flows are fixed.
-# expr-to-flows should not generate any conjunction flows.
 lflow="ip4.src == {10.0.0.1, 10.0.0.2, 10.0.0.3} && \
 ip4.dst == {20.0.0.1, 20.0.0.2, 20.0.0.3}"
 AT_CHECK([expr_to_flow "$lflow"], [0], [dnl
-ip,nw_src=10.0.0.1,nw_dst=20.0.0.1
-ip,nw_src=10.0.0.1,nw_dst=20.0.0.2
-ip,nw_src=10.0.0.1,nw_dst=20.0.0.3
-ip,nw_src=10.0.0.2,nw_dst=20.0.0.1
-ip,nw_src=10.0.0.2,nw_dst=20.0.0.2
-ip,nw_src=10.0.0.2,nw_dst=20.0.0.3
-ip,nw_src=10.0.0.3,nw_dst=20.0.0.1
-ip,nw_src=10.0.0.3,nw_dst=20.0.0.2
-ip,nw_src=10.0.0.3,nw_dst=20.0.0.3
+conj_id=1,ip
+ip,nw_dst=20.0.0.1: conjunction(1, 0/2)
+ip,nw_dst=20.0.0.2: conjunction(1, 0/2)
+ip,nw_dst=20.0.0.3: conjunction(1, 0/2)
+ip,nw_src=10.0.0.1: conjunction(1, 1/2)
+ip,nw_src=10.0.0.2: conjunction(1, 1/2)
+ip,nw_src=10.0.0.3: conjunction(1, 1/2)
 ])
 
 lflow="ip && (!ct.est || (ct.est && ct_label.blocked == 1))"
@@ -759,12 +730,12 @@ ct_state=-est+trk,ipv6
 lflow="ip4.src == {10.0.0.1, 10.0.0.2, 10.0.0.3} && \
 ip4.dst == {20.0.0.1, 20.0.0.2}"
 AT_CHECK([expr_to_flow "$lflow"], [0], [dnl
-ip,nw_src=10.0.0.1,nw_dst=20.0.0.1
-ip,nw_src=10.0.0.1,nw_dst=20.0.0.2
-ip,nw_src=10.0.0.2,nw_dst=20.0.0.1
-ip,nw_src=10.0.0.2,nw_dst=20.0.0.2
-ip,nw_src=10.0.0.3,nw_dst=20.0.0.1
-ip,nw_src=10.0.0.3,nw_dst=20.0.0.2
+conj_id=1,ip
+ip,nw_dst=20.0.0.1: conjunction(1, 0/2)
+ip,nw_dst=20.0.0.2: conjunction(1, 0/2)
+ip,nw_src=10.0.0.1: conjunction(1, 1/2)
+ip,nw_src=10.0.0.2: conjunction(1, 1/2)
+ip,nw_src=10.0.0.3: conjunction(1, 1/2)
 ])
 
 lflow="ip4 && ip4.src == {10.0.0.1, 10.0.0.2, 10.0.0.3} && \
@@ -772,60 +743,19 @@ ip4.dst == {20.0.0.1, 20.0.0.2, 20.0.0.3} && \
 tcp.dst >= 1000 && tcp.dst <= 1010"
 
 AT_CHECK([expr_to_flow "$lflow"], [0], [dnl
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_dst=1000
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_dst=1001
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.1,tp_dst=1010
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.2,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.2,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.2,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.2,tp_dst=1000
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.2,tp_dst=1001
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.2,tp_dst=1010
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.3,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.3,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.3,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.3,tp_dst=1000
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.3,tp_dst=1001
-tcp,nw_src=10.0.0.1,nw_dst=20.0.0.3,tp_dst=1010
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.1,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.1,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.1,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.1,tp_dst=1000
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.1,tp_dst=1001
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.1,tp_dst=1010
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.2,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.2,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.2,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.2,tp_dst=1000
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.2,tp_dst=1001
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.2,tp_dst=1010
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.3,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.3,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.3,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.3,tp_dst=1000
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.3,tp_dst=1001
-tcp,nw_src=10.0.0.2,nw_dst=20.0.0.3,tp_dst=1010
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.1,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.1,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.1,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.1,tp_dst=1000
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.1,tp_dst=1001
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.1,tp_dst=1010
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.2,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.2,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.2,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.2,tp_dst=1000
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.2,tp_dst=1001
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.2,tp_dst=1010
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.3,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.3,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.3,tp_dst=0x3f0/0xfffe
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.3,tp_dst=1000
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.3,tp_dst=1001
-tcp,nw_src=10.0.0.3,nw_dst=20.0.0.3,tp_dst=1010
+conj_id=1,tcp
+tcp,nw_dst=20.0.0.1: conjunction(1, 0/3)
+tcp,nw_dst=20.0.0.2: conjunction(1, 0/3)
+tcp,nw_dst=20.0.0.3: conjunction(1, 0/3)
+tcp,nw_src=10.0.0.1: conjunction(1, 1/3)
+tcp,nw_src=10.0.0.2: conjunction(1, 1/3)
+tcp,nw_src=10.0.0.3: conjunction(1, 1/3)
+tcp,tp_dst=0x3ea/0xfffe: conjunction(1, 2/3)
+tcp,tp_dst=0x3ec/0xfffc: conjunction(1, 2/3)
+tcp,tp_dst=0x3f0/0xfffe: conjunction(1, 2/3)
+tcp,tp_dst=1000: conjunction(1, 2/3)
+tcp,tp_dst=1001: conjunction(1, 2/3)
+tcp,tp_dst=1010: conjunction(1, 2/3)
 ])
 
 lflow="ip4 && ip4.src == {10.0.0.4, 10.0.0.5, 10.0.0.6} && \
@@ -834,1101 +764,41 @@ tcp.dst <= 2000 && tcp.src >=1000 && tcp.src <= 2000) \
 || ip4.dst == 20.0.0.5 || ip4.dst == 20.0.0.6)"
 
 AT_CHECK([expr_to_flow "$lflow"], [0], [dnl
+conj_id=1,tcp
 ip,nw_src=10.0.0.4,nw_dst=20.0.0.5
 ip,nw_src=10.0.0.4,nw_dst=20.0.0.6
 ip,nw_src=10.0.0.5,nw_dst=20.0.0.5
 ip,nw_src=10.0.0.5,nw_dst=20.0.0.6
 ip,nw_src=10.0.0.6,nw_dst=20.0.0.5
 ip,nw_src=10.0.0.6,nw_dst=20.0.0.6
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.4,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.7,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.4,nw_dst=20.0.0.8,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.4,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.7,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.5,nw_dst=20.0.0.8,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.4,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.7,tp_src=2000,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ea/0xfffe,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3ec/0xfffc,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x3f0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x400/0xfe00,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x600/0xff00,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x700/0xff80,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x780/0xffc0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=0x7c0/0xfff0,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1000,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=1001,tp_dst=2000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3ea/0xfffe
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3ec/0xfffc
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x3f0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x400/0xfe00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x600/0xff00
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x700/0xff80
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x780/0xffc0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=0x7c0/0xfff0
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=1000
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=1001
-tcp,nw_src=10.0.0.6,nw_dst=20.0.0.8,tp_src=2000,tp_dst=2000
+tcp,nw_dst=20.0.0.4: conjunction(1, 0/4)
+tcp,nw_dst=20.0.0.7: conjunction(1, 0/4)
+tcp,nw_dst=20.0.0.8: conjunction(1, 0/4)
+tcp,nw_src=10.0.0.4: conjunction(1, 1/4)
+tcp,nw_src=10.0.0.5: conjunction(1, 1/4)
+tcp,nw_src=10.0.0.6: conjunction(1, 1/4)
+tcp,tp_dst=0x3ea/0xfffe: conjunction(1, 2/4)
+tcp,tp_dst=0x3ec/0xfffc: conjunction(1, 2/4)
+tcp,tp_dst=0x3f0/0xfff0: conjunction(1, 2/4)
+tcp,tp_dst=0x400/0xfe00: conjunction(1, 2/4)
+tcp,tp_dst=0x600/0xff00: conjunction(1, 2/4)
+tcp,tp_dst=0x700/0xff80: conjunction(1, 2/4)
+tcp,tp_dst=0x780/0xffc0: conjunction(1, 2/4)
+tcp,tp_dst=0x7c0/0xfff0: conjunction(1, 2/4)
+tcp,tp_dst=1000: conjunction(1, 2/4)
+tcp,tp_dst=1001: conjunction(1, 2/4)
+tcp,tp_dst=2000: conjunction(1, 2/4)
+tcp,tp_src=0x3ea/0xfffe: conjunction(1, 3/4)
+tcp,tp_src=0x3ec/0xfffc: conjunction(1, 3/4)
+tcp,tp_src=0x3f0/0xfff0: conjunction(1, 3/4)
+tcp,tp_src=0x400/0xfe00: conjunction(1, 3/4)
+tcp,tp_src=0x600/0xff00: conjunction(1, 3/4)
+tcp,tp_src=0x700/0xff80: conjunction(1, 3/4)
+tcp,tp_src=0x780/0xffc0: conjunction(1, 3/4)
+tcp,tp_src=0x7c0/0xfff0: conjunction(1, 3/4)
+tcp,tp_src=1000: conjunction(1, 3/4)
+tcp,tp_src=1001: conjunction(1, 3/4)
+tcp,tp_src=2000: conjunction(1, 3/4)
 ])
 AT_CLEANUP
 
@@ -2173,15 +1043,18 @@ ct_dnat;
 ct_dnat(192.168.1.2);
     encodes as ct(commit,table=19,zone=NXM_NX_REG11[0..15],nat(dst=192.168.1.2))
     has prereqs ip
+ct_dnat(fd11::2);
+    encodes as ct(commit,table=19,zone=NXM_NX_REG11[0..15],nat(dst=fd11::2))
+    has prereqs ip
 
 ct_dnat(192.168.1.2, 192.168.1.3);
     Syntax error at `,' expecting `)'.
 ct_dnat(foo);
-    Syntax error at `foo' expecting IPv4 address.
+    Syntax error at `foo' expecting IPv4 or IPv6 address.
 ct_dnat(foo, bar);
-    Syntax error at `foo' expecting IPv4 address.
+    Syntax error at `foo' expecting IPv4 or IPv6 address.
 ct_dnat();
-    Syntax error at `)' expecting IPv4 address.
+    Syntax error at `)' expecting IPv4 or IPv6 address.
 
 # ct_snat
 ct_snat;
@@ -2190,15 +1063,18 @@ ct_snat;
 ct_snat(192.168.1.2);
     encodes as ct(commit,table=19,zone=NXM_NX_REG12[0..15],nat(src=192.168.1.2))
     has prereqs ip
+ct_snat(fd11::2);
+    encodes as ct(commit,table=19,zone=NXM_NX_REG12[0..15],nat(src=fd11::2))
+    has prereqs ip
 
 ct_snat(192.168.1.2, 192.168.1.3);
     Syntax error at `,' expecting `)'.
 ct_snat(foo);
-    Syntax error at `foo' expecting IPv4 address.
+    Syntax error at `foo' expecting IPv4 or IPv6 address.
 ct_snat(foo, bar);
-    Syntax error at `foo' expecting IPv4 address.
+    Syntax error at `foo' expecting IPv4 or IPv6 address.
 ct_snat();
-    Syntax error at `)' expecting IPv4 address.
+    Syntax error at `)' expecting IPv4 or IPv6 address.
 
 # ct_clear
 ct_clear;
@@ -2591,6 +1467,19 @@ bind_vport("xyzzy",;
     Syntax error at `;' expecting field name.
 bind_vport("xyzzy", inport;
     Syntax error at `;' expecting `)'.
+
+# handle_svc_check
+handle_svc_check(inport);
+    encodes as controller(userdata=00.00.00.12.00.00.00.00)
+
+handle_svc_check(outport);
+    encodes as push:NXM_NX_REG14[],push:NXM_NX_REG15[],pop:NXM_NX_REG14[],controller(userdata=00.00.00.12.00.00.00.00),pop:NXM_NX_REG14[]
+
+handle_svc_check();
+    Syntax error at `)' expecting field name.
+
+handle_svc_check(reg0);
+    Cannot use numeric field reg0 where string field is required.
 
 # Miscellaneous negative tests.
 ;
@@ -4001,7 +2890,7 @@ test_ip() {
     done
 }
 
-# test_arp INPORT SHA SPA TPA [REPLY_HA]
+# test_arp INPORT SHA SPA TPA FLOOD [REPLY_HA]
 #
 # Causes a packet to be received on INPORT.  The packet is an ARP
 # request with SHA, SPA, and TPA as specified.  If REPLY_HA is provided, then
@@ -4012,21 +2901,25 @@ test_ip() {
 # SHA and REPLY_HA are each 12 hex digits.
 # SPA and TPA are each 8 hex digits.
 test_arp() {
-    local inport=$1 sha=$2 spa=$3 tpa=$4 reply_ha=$5
+    local inport=$1 sha=$2 spa=$3 tpa=$4 flood=$5 reply_ha=$6
     local request=ffffffffffff${sha}08060001080006040001${sha}${spa}ffffffffffff${tpa}
     hv=hv`vif_to_hv $inport`
     as $hv ovs-appctl netdev-dummy/receive vif$inport $request
     as $hv ovs-appctl ofproto/trace br-int in_port=$inport $request
 
     # Expect to receive the broadcast ARP on the other logical switch ports if
-    # IP address is not configured to the switch patch port.
+    # IP address is not configured on the switch patch port or on the router
+    # port (i.e, $flood == 1).
     local i=`vif_to_ls $inport`
     local j k
     for j in 1 2 3; do
         for k in 1 2 3; do
-            # 192.168.33.254 is configured to the switch patch port for lrp33,
-            # so no ARP flooding expected for it.
-            if test $i$j$k != $inport && test $tpa != `ip_to_hex 192 168 33 254`; then
+            # Skip ingress port.
+            if test $i$j$k == $inport; then
+                continue
+            fi
+
+            if test X$flood == X1; then
                 echo $request >> $i$j$k.expected
             fi
         done
@@ -4163,9 +3056,9 @@ for i in 1 2 3; do
       otherip=`ip_to_hex 192 168 $i$j 55` # Some other IP in subnet
       externalip=`ip_to_hex 1 2 3 4`      # Some other IP not in subnet
 
-      test_arp $i$j$k $smac $sip        $rip        $rmac      #4
-      test_arp $i$j$k $smac $otherip    $rip        $rmac      #5
-      test_arp $i$j$k $smac $sip        $otherip               #6
+      test_arp $i$j$k $smac $sip        $rip       0     $rmac       #4
+      test_arp $i$j$k $smac $otherip    $rip       0     $rmac       #5
+      test_arp $i$j$k $smac $sip        $otherip   1                 #6
 
       # When rip is 192.168.33.254, ARP request from externalip won't be
       # filtered, because 192.168.33.254 is configured to switch peer port
@@ -4174,7 +3067,7 @@ for i in 1 2 3; do
       if test $i = 3 && test $j = 3; then
         lrp33_rsp=$rmac
       fi
-      test_arp $i$j$k $smac $externalip $rip        $lrp33_rsp #7
+      test_arp $i$j$k $smac $externalip $rip       0      $lrp33_rsp #7
 
       # MAC binding should be learned from ARP request.
       host_mac_pretty=f0:00:00:00:0$i:$j$k
@@ -9166,7 +8059,7 @@ ovn-nbctl lsp-add alice alice1 \
 -- lsp-set-addresses alice1 "f0:00:00:01:02:05 172.16.1.3"
 
 # Create logical port bob1 in bob
-ovn-nbctl lsp-add bob bob1 \
+ovn-nbctl --wait=hv lsp-add bob bob1 \
 -- lsp-set-addresses bob1 "f0:00:00:01:02:06 172.16.1.4"
 
 # Pre-populate the hypervisors' ARP tables so that we don't lose any
@@ -10719,7 +9612,7 @@ ovn-nbctl --wait=hv --timeout=3 sync
 # Check that there is a logical flow in logical switch foo's pipeline
 # to set the outport to rp-foo (which is expected).
 OVS_WAIT_UNTIL([test 1 = `ovn-sbctl dump-flows foo | grep ls_in_l2_lkup | \
-grep rp-foo | grep -v is_chassis_resident | wc -l`])
+grep rp-foo | grep -v is_chassis_resident | grep priority=50 -c`])
 
 # Set the option 'reside-on-redirect-chassis' for foo
 ovn-nbctl set logical_router_port foo options:reside-on-redirect-chassis=true
@@ -10727,7 +9620,7 @@ ovn-nbctl set logical_router_port foo options:reside-on-redirect-chassis=true
 # to set the outport to rp-foo with the condition is_chassis_redirect.
 ovn-sbctl dump-flows foo
 OVS_WAIT_UNTIL([test 1 = `ovn-sbctl dump-flows foo | grep ls_in_l2_lkup | \
-grep rp-foo | grep is_chassis_resident | wc -l`])
+grep rp-foo | grep is_chassis_resident | grep priority=50 -c`])
 
 echo "---------NB dump-----"
 ovn-nbctl show
@@ -12157,12 +11050,26 @@ ovn-nbctl --wait=hv --timeout=3 sync
 # doesn't have the same effect because "name" is conserved, and the
 # Chassis entry is not replaced.
 
-> gw1/ovn-controller.log
-
 gw2_chassis=$(ovn-sbctl --bare --columns=_uuid find Chassis name=gw2)
 ovn-sbctl destroy Chassis $gw2_chassis
 
-OVS_WAIT_UNTIL([test 0 = `grep -c "Releasing lport" gw1/ovn-controller.log`])
+# Wait for the gw2_chassis row is recreated.
+OVS_WAIT_UNTIL([test 1 = `ovn-sbctl --bare --columns=_uuid find Chassis name=gw2 | wc -l`])
+
+gw1_chassis=$(ovn-sbctl --bare --columns=_uuid find Chassis name=gw1)
+gw2_chassis=$(ovn-sbctl --bare --columns=_uuid find Chassis name=gw2)
+
+# When gw2 chassis row is destroyed, it gets recreated. There
+# is a small window in which gw2 may claim the cr-outside port if
+# it has not established bfd tunnel with gw1.
+# So make sure that, cr-outside is claimed by gw1 finally.
+OVS_WAIT_WHILE(
+    [cr_outside_ch=`ovn-sbctl --bare --columns=chassis find Port_binding logical_port=cr-outside`
+     test $cr_outside_ch = $gw2_chassis])
+
+OVS_WAIT_UNTIL(
+    [cr_outside_ch=`ovn-sbctl --bare --columns=chassis find Port_binding logical_port=cr-outside`
+     test $cr_outside_ch = $gw1_chassis])
 
 OVN_CLEANUP([gw1],[gw2],[hv1])
 
@@ -12537,14 +11444,16 @@ construct_expected_ra() {
 
     local mtu=$1
     local ra_mo=$2
-    local ra_prefix_la=$3
+    local rdnss=$3
+    local dnssl=$4
+    local ra_prefix_la=$5
 
     local slla=0101${src_mac}
     local mtu_opt=""
     if test $mtu != 0; then
         mtu_opt=05010000${mtu}
     fi
-    shift 3
+    shift 5
 
     local prefix=""
     while [[ $# -gt 0 ]] ; do
@@ -12554,7 +11463,16 @@ construct_expected_ra() {
         shift 2
     done
 
-    local ra=ff${ra_mo}ffff0000000000000000${slla}${mtu_opt}${prefix}
+    local rdnss_opt=""
+    if test $rdnss != 0; then
+        rdnss_opt=19030000ffffffff${rdnss}
+    fi
+    local dnssl_opt=""
+    if test $dnssl != 0; then
+        dnssl_opt=1f030000ffffffff${dnssl}
+    fi
+
+    local ra=ff${ra_mo}ffff0000000000000000${slla}${mtu_opt}${prefix}${rdnss_opt}${dnssl_opt}
     local icmp=8600XXXX${ra}
 
     local ip_len=$(expr ${#icmp} / 2)
@@ -12589,23 +11507,33 @@ ra_test() {
 }
 
 # Baseline test with no MTU
-ra_test 0 00 c0 40 aef00000000000000000000000000000
+ra_test 0 00 0 0 c0 40 aef00000000000000000000000000000
 
 # Now make sure an MTU option makes it
 ovn-nbctl --wait=hv set Logical_Router_Port ro-sw ipv6_ra_configs:mtu=1500
-ra_test 000005dc 00 c0 40 aef00000000000000000000000000000
+ra_test 000005dc 00 0 0 c0 40 aef00000000000000000000000000000
 
 # Now test for multiple network prefixes
 ovn-nbctl --wait=hv set Logical_Router_port ro-sw networks='aef0\:\:1/64 fd0f\:\:1/48'
-ra_test 000005dc 00 c0 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
+ra_test 000005dc 00 0 0 c0 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
 
-# Test a different address mode now
+# Now test for RDNSS
+ovn-nbctl --wait=hv set Logical_Router_port ro-sw ipv6_ra_configs:rdnss='aef0::11'
+dns_addr=aef00000000000000000000000000011
+ra_test 000005dc 00 $dns_addr 0 c0 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
+
+# Now test for DNSSL
+ovn-nbctl --wait=hv set Logical_Router_port ro-sw ipv6_ra_configs:dnssl="aa.bb.cc"
+dnssl=02616102626202636300000000000000
+ra_test 000005dc 00 $dns_addr $dnssl c0 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
+
+## Test a different address mode now
 ovn-nbctl --wait=hv set Logical_Router_Port ro-sw ipv6_ra_configs:address_mode=dhcpv6_stateful
-ra_test 000005dc 80 80 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
+ra_test 000005dc 80 $dns_addr $dnssl 80 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
 
 # And the other address mode
 ovn-nbctl --wait=hv set Logical_Router_Port ro-sw ipv6_ra_configs:address_mode=dhcpv6_stateless
-ra_test 000005dc 40 c0 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
+ra_test 000005dc 40 $dns_addr $dnssl c0 40 aef00000000000000000000000000000 30 fd0f0000000000000000000000000000
 
 OVN_CLEANUP([hv1],[hv2])
 AT_CLEANUP
@@ -13377,7 +12305,7 @@ ovn-nbctl create Address_Set name=set1 \
 addresses=\"10.0.0.4\",\"10.0.0.5\",\"10.0.0.6\"
 ovn-nbctl create Address_Set name=set2 \
 addresses=\"10.0.0.7\",\"10.0.0.8\",\"10.0.0.9\"
-ovn-nbctl acl-add ls1 to-lport 1002 \
+ovn-nbctl acl-add ls1 to-lport 1001 \
 'ip4 && ip4.src == $set1 && ip4.dst == $set1' allow
 ovn-nbctl acl-add ls1 to-lport 1001 \
 'ip4 && ip4.src == $set1 && ip4.dst == $set2' drop
@@ -13426,7 +12354,7 @@ cat 2.expected > expout
 $PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" hv1/vif2-tx.pcap > 2.packets
 AT_CHECK([cat 2.packets], [0], [expout])
 
-# There should be total of 12 flows present with conjunction action and 2 flows
+# There should be total of 9 flows present with conjunction action and 2 flows
 # with conj match. Eg.
 # table=44, priority=2002,conj_id=2,metadata=0x1 actions=resubmit(,45)
 # table=44, priority=2001,conj_id=3,metadata=0x1 actions=drop
@@ -13436,18 +12364,13 @@ AT_CHECK([cat 2.packets], [0], [expout])
 # priority=2001,ip,metadata=0x1,nw_dst=10.0.0.7 actions=conjunction(3,2/2)
 # priority=2001,ip,metadata=0x1,nw_dst=10.0.0.9 actions=conjunction(3,2/2)
 # priority=2001,ip,metadata=0x1,nw_dst=10.0.0.8 actions=conjunction(3,2/2)
-# priority=2002,ip,metadata=0x1,nw_src=10.0.0.6 actions=conjunction(2,1/2)
-# priority=2002,ip,metadata=0x1,nw_src=10.0.0.4 actions=conjunction(2,1/2)
-# priority=2002,ip,metadata=0x1,nw_src=10.0.0.5 actions=conjunction(2,1/2)
-# priority=2001,ip,metadata=0x1,nw_src=10.0.0.6 actions=conjunction(3,1/2)
-# priority=2001,ip,metadata=0x1,nw_src=10.0.0.4 actions=conjunction(3,1/2)
-# priority=2001,ip,metadata=0x1,nw_src=10.0.0.5 actions=conjunction(3,1/2)
+# priority=2002,ip,metadata=0x1,nw_src=10.0.0.6 actions=conjunction(2,1/2),conjunction(3,1/2)
+# priority=2002,ip,metadata=0x1,nw_src=10.0.0.4 actions=conjunction(2,1/2),conjunction(3,1/2)
+# priority=2002,ip,metadata=0x1,nw_src=10.0.0.5 actions=conjunction(2,1/2),conjunction(3,1/2)
 
-# conjunction is disabled in OVN until the issues related to it are
-# fixed.
-OVS_WAIT_UNTIL([test 0 = `as hv1 ovs-ofctl dump-flows br-int | \
+OVS_WAIT_UNTIL([test 9 = `as hv1 ovs-ofctl dump-flows br-int | \
 grep conjunction | wc -l`])
-OVS_WAIT_UNTIL([test 0 = `as hv1 ovs-ofctl dump-flows br-int | \
+OVS_WAIT_UNTIL([test 2 = `as hv1 ovs-ofctl dump-flows br-int | \
 grep conj_id | wc -l`])
 
 as hv1 ovs-ofctl dump-flows br-int
@@ -14521,7 +13444,25 @@ OVS_WAIT_UNTIL(
 logical_port=ls1-lp_ext1`
     test "$chassis" = "$hv1_uuid"])
 
-OVN_CLEANUP([hv1],[hv2],[hv3])
+# Stop ovn-controllers on hv1 and hv3.
+as hv1 ovn-appctl -t ovn-controller exit
+as hv3 ovn-appctl -t ovn-controller exit
+
+# hv2 should be master and claim ls1-lp_ext1
+OVS_WAIT_UNTIL(
+    [chassis=`ovn-sbctl --bare --columns chassis find port_binding \
+logical_port=ls1-lp_ext1`
+    test "$chassis" = "$hv2_uuid"])
+
+as hv1
+OVS_APP_EXIT_AND_WAIT([ovs-vswitchd])
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as hv3
+OVS_APP_EXIT_AND_WAIT([ovs-vswitchd])
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+OVN_CLEANUP([hv2])
 AT_CLEANUP
 
 AT_SETUP([ovn -- Address Set Incremental Processing])
@@ -17472,4 +16413,713 @@ grep 101 | wc -l`])
 
 OVN_CLEANUP([hv1])
 
+AT_CLEANUP
+
+AT_SETUP([ovn -- Stateless Floating IP])
+ovn_start
+
+# In this test cases we create 3 switches, all connected to same
+# physical network (through br-phys on each HV). LS1 and LS2 have
+# 1 VIF each. Each HV has 1 VIF port. The first digit
+# of VIF port name indicates the hypervisor it is bound to, e.g.
+# lp23 means VIF 3 on hv2.
+#
+# All the switches are connected to a logical router "router".
+#
+# There is an external logical switch, ls-north.
+# This test validates the stateless floating ip implementation.
+#
+# Each switch's VLAN tag and their logical switch ports are:
+#   - ls1:
+#       - tagged with VLAN 101
+#       - ports: lp11
+#   - ls2:
+#       - tagged with VLAN 201
+#       - ports: lp22
+#   - ls-north:
+#       - tagged with VLAN 1000
+# Note: a localnet port is created for each switch to connect to
+# physical network.
+
+for i in 1 2; do
+    ls_name=ls$i
+    ovn-nbctl ls-add $ls_name
+    ln_port_name=ln$i
+    if test $i -eq 1; then
+        ovn-nbctl lsp-add $ls_name $ln_port_name "" 101
+    elif test $i -eq 2; then
+        ovn-nbctl lsp-add $ls_name $ln_port_name "" 201
+    fi
+    ovn-nbctl lsp-set-addresses $ln_port_name unknown
+    ovn-nbctl lsp-set-type $ln_port_name localnet
+    ovn-nbctl lsp-set-options $ln_port_name network_name=phys
+done
+
+# lsp_to_ls LSP
+#
+# Prints the name of the logical switch that contains LSP.
+lsp_to_ls () {
+    case $1 in dnl (
+        lp?[[11]]) echo ls1 ;; dnl (
+        lp?[[12]]) echo ls2 ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+vif_to_hv () {
+    case $1 in dnl (
+        vif[[1]]?) echo hv1 ;; dnl (
+        vif[[2]]?) echo hv2 ;; dnl (
+        vif?[[north]]?) echo hv4 ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+ip_to_hex() {
+       printf "%02x%02x%02x%02x" "$@"
+}
+
+net_add n1
+for i in 1 2; do
+    sim_add hv$i
+    as hv$i
+    ovs-vsctl add-br br-phys
+    ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+    ovs-vsctl set open . external-ids:ovn-chassis-mac-mappings="phys:aa:bb:cc:dd:ee:$i$i"
+    ovn_attach n1 br-phys 192.168.0.$i
+
+    ovs-vsctl add-port br-int vif$i$i -- \
+        set Interface vif$i$i external-ids:iface-id=lp$i$i \
+                              options:tx_pcap=hv$i/vif$i$i-tx.pcap \
+                              options:rxq_pcap=hv$i/vif$i$i-rx.pcap \
+                              ofport-request=$i$i
+
+    lsp_name=lp$i$i
+    ls_name=$(lsp_to_ls $lsp_name)
+
+    ovn-nbctl lsp-add $ls_name $lsp_name
+    ovn-nbctl lsp-set-addresses $lsp_name "f0:00:00:00:00:$i$i 192.168.$i.$i"
+    ovn-nbctl lsp-set-port-security $lsp_name f0:00:00:00:00:$i$i
+
+    OVS_WAIT_UNTIL([test x`ovn-nbctl lsp-get-up $lsp_name` = xup])
+
+done
+
+ovn-nbctl ls-add ls-underlay
+ovn-nbctl lsp-add ls-underlay ln3 "" 1000
+ovn-nbctl lsp-set-addresses ln3 unknown
+ovn-nbctl lsp-set-type ln3 localnet
+ovn-nbctl lsp-set-options ln3 network_name=phys
+
+ovn-nbctl ls-add ls-north
+ovn-nbctl lsp-add ls-north ln4 "" 1000
+ovn-nbctl lsp-set-addresses ln4 unknown
+ovn-nbctl lsp-set-type ln4 localnet
+ovn-nbctl lsp-set-options ln4 network_name=phys
+
+# Add a VM on ls-north
+ovn-nbctl lsp-add ls-north lp-north
+ovn-nbctl lsp-set-addresses lp-north "f0:f0:00:00:00:11 172.31.0.10"
+ovn-nbctl lsp-set-port-security lp-north f0:f0:00:00:00:11
+
+# Add 3rd hypervisor
+sim_add hv3
+as hv3 ovs-vsctl add-br br-phys
+as hv3 ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+as hv3 ovs-vsctl set open . external-ids:ovn-chassis-mac-mappings="phys:aa:bb:cc:dd:ee:33"
+as hv3 ovn_attach n1 br-phys 192.168.0.3
+
+# Add 4th hypervisor
+sim_add hv4
+as hv4 ovs-vsctl add-br br-phys
+as hv4 ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+as hv4 ovs-vsctl set open . external-ids:ovn-chassis-mac-mappings="phys:aa:bb:cc:dd:ee:44"
+as hv4 ovn_attach n1 br-phys 192.168.0.4
+
+as hv4 ovs-vsctl add-port br-int vif-north -- \
+        set Interface vif-north external-ids:iface-id=lp-north \
+                              options:tx_pcap=hv4/vif-north-tx.pcap \
+                              options:rxq_pcap=hv4/vif-north-rx.pcap \
+                              ofport-request=44
+
+ovn-nbctl lr-add router
+ovn-nbctl lrp-add router router-to-ls1 00:00:01:01:02:03 192.168.1.3/24
+ovn-nbctl lrp-add router router-to-ls2 00:00:01:01:02:05 192.168.2.3/24
+ovn-nbctl lrp-add router router-to-underlay 00:00:01:01:02:07 172.31.0.1/24
+
+ovn-nbctl lsp-add ls1 ls1-to-router -- set Logical_Switch_Port ls1-to-router type=router \
+          options:router-port=router-to-ls1 -- lsp-set-addresses ls1-to-router router
+ovn-nbctl lsp-add ls2 ls2-to-router -- set Logical_Switch_Port ls2-to-router type=router \
+          options:router-port=router-to-ls2 -- lsp-set-addresses ls2-to-router router
+ovn-nbctl lsp-add ls-underlay underlay-to-router -- set Logical_Switch_Port \
+                              underlay-to-router type=router \
+                              options:router-port=router-to-underlay \
+                              -- lsp-set-addresses underlay-to-router router
+
+ovn-nbctl lrp-set-gateway-chassis router-to-underlay hv3
+ovn-nbctl --stateless lr-nat-add router dnat_and_snat 172.31.0.100 192.168.1.1
+ovn-nbctl lrp-set-redirect-type router-to-underlay bridged
+
+ovn-nbctl --wait=sb sync
+
+
+OVN_POPULATE_ARP
+
+# lsp_to_ls LSP
+#
+# Prints the name of the logical switch that contains LSP.
+lsp_to_ls () {
+    case $1 in dnl (
+        lp?[[11]]) echo ls1 ;; dnl (
+        lp?[[12]]) echo ls2 ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+vif_to_ls () {
+    case $1 in dnl (
+        vif?[[11]]) echo ls1 ;; dnl (
+        vif?[[12]]) echo ls2 ;; dnl (
+        vif-north) echo ls-north ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+hv_to_num () {
+    case $1 in dnl (
+        hv1) echo 1 ;; dnl (
+        hv2) echo 2 ;; dnl (
+        hv3) echo 3 ;; dnl (
+        hv4) echo 4 ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+vif_to_num () {
+    case $1 in dnl (
+        vif22) echo 22 ;; dnl (
+        vif21) echo 21 ;; dnl (
+        vif11) echo 11 ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+vif_to_hv () {
+    case $1 in dnl (
+        vif[[1]]?) echo hv1 ;; dnl (
+        vif[[2]]?) echo hv2 ;; dnl (
+        vif-north) echo hv4 ;; dnl (
+        *) AT_FAIL_IF([:]) ;;
+    esac
+}
+
+vif_to_lrp () {
+    echo router-to-`vif_to_ls $1`
+}
+
+ip_to_hex() {
+       printf "%02x%02x%02x%02x" "$@"
+}
+
+
+test_ip() {
+        # This packet has bad checksums but logical L3 routing doesn't check.
+        local inport=$1 src_mac=$2 dst_mac=$3 src_ip=$4 dst_ip=$5 outport=$6
+        local packet=${dst_mac}${src_mac}08004500001c0000000040110000${src_ip}${dst_ip}0035111100080000
+        shift; shift; shift; shift; shift
+        hv=`vif_to_hv $inport`
+        as $hv ovs-appctl netdev-dummy/receive $inport $packet
+        in_ls=`vif_to_ls $inport`
+        for outport; do
+            out_ls=`vif_to_ls $outport`
+            if test $in_ls = $out_ls; then
+                # Ports on the same logical switch receive exactly the same packet.
+                echo $packet
+            else
+                # Routing decrements TTL and updates source and dest MAC
+                # (and checksum).
+                out_lrp=`vif_to_lrp $outport`
+                # For North-South, packet will come via gateway chassis, i.e hv3
+                if test $inport = vif-north; then
+                    echo f0000000001100000101020308004500001c000000003f110100${src_ip}${dst_ip}0035111100080000 >> $outport.expected
+                fi
+                if test $outport = vif-north; then
+                    echo f0f00000001100000101020708004500001c000000003e111726ac1f0064${dst_ip}0035111100080000 >> $outport.expected
+                fi
+            fi >> $outport.expected
+        done
+}
+
+# Dump a bunch of info helpful for debugging if there's a failure.
+
+echo "------ OVN dump ------"
+ovn-nbctl show
+ovn-nbctl lr-nat-list router
+ovn-sbctl show
+ovn-sbctl list port_binding
+ovn-sbctl list mac_binding
+ovn-sbctl dump-flows
+
+echo "------ hv1 dump ------"
+as hv1 ovs-vsctl show
+as hv1 ovs-vsctl list Open_Vswitch
+
+echo "------ hv2 dump ------"
+as hv2 ovs-vsctl show
+as hv2 ovs-vsctl list Open_Vswitch
+
+echo "------ hv3 dump ------"
+as hv3 ovs-vsctl show
+as hv3 ovs-vsctl list Open_Vswitch
+
+echo "------ hv4 dump ------"
+as hv4 ovs-vsctl show
+as hv4 ovs-vsctl list Open_Vswitch
+
+echo "Send traffic South to Nouth"
+sip=`ip_to_hex 192 168 1 1`
+dip=`ip_to_hex 172 31 0 10`
+test_ip vif11 f00000000011 000001010203 $sip $dip vif-north
+
+# Confirm that South to North traffic works fine.
+OVN_CHECK_PACKETS_REMOVE_BROADCAST([hv4/vif-north-tx.pcap], [vif-north.expected])
+
+# Confirm that NATing happened without connection tracker
+
+AT_CHECK([ovn-sbctl dump-flows router | grep ct_snat | wc -l], [0], [0
+])
+
+AT_CHECK([ovn-sbctl dump-flows router | grep ct_dnat | wc -l], [0], [0
+])
+
+AT_CHECK([ovn-sbctl dump-flows router | grep ip4.dst=| wc -l], [0], [2
+])
+
+AT_CHECK([ovn-sbctl dump-flows router | grep ip4.src=| wc -l], [0], [2
+])
+
+echo "----------- Post Traffic hv1 dump -----------"
+as hv1 ovs-ofctl dump-flows br-int
+as hv1 ovs-ofctl show br-phys
+as hv1 ovs-appctl fdb/show br-phys
+as hv1 ovs-dpctl dump-flows
+
+echo "----------- Post Traffic hv2 dump -----------"
+as hv2 ovs-ofctl dump-flows br-int
+as hv2 ovs-ofctl show br-phys
+as hv2 ovs-appctl fdb/show br-phys
+
+echo "----------- Post Traffic hv3 dump -----------"
+as hv3 ovs-ofctl dump-flows br-int
+as hv3 ovs-ofctl show br-phys
+as hv3 ovs-appctl dpctl/dump-conntrack
+as hv3 ovs-appctl fdb/show br-phys
+as hv3 ovs-dpctl dump-flows
+as hv3 ovs-ofctl dump-flows br-int
+
+echo "----------- Post Traffic hv4 dump -----------"
+as hv4 ovs-ofctl dump-flows br-int
+as hv4 ovs-ofctl show br-phys
+as hv4 ovs-appctl fdb/show br-phys
+
+OVN_CLEANUP([hv1],[hv2],[hv3],[hv4])
+AT_CLEANUP
+
+AT_SETUP([ovn -- Load balancer health checks])
+AT_KEYWORDS([lb])
+ovn_start
+
+net_add n1
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+ovs-vsctl -- add-port br-int hv1-vif1 -- \
+    set interface hv1-vif1 external-ids:iface-id=sw0-p1 \
+    options:tx_pcap=hv1/vif1-tx.pcap \
+    options:rxq_pcap=hv1/vif1-rx.pcap \
+    ofport-request=1
+ovs-vsctl -- add-port br-int hv1-vif2 -- \
+    set interface hv1-vif2 external-ids:iface-id=sw0-p2 \
+    options:tx_pcap=hv1/vif2-tx.pcap \
+    options:rxq_pcap=hv1/vif2-rx.pcap \
+    ofport-request=2
+
+sim_add hv2
+as hv2
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.2
+ovs-vsctl -- add-port br-int hv2-vif1 -- \
+    set interface hv2-vif1 external-ids:iface-id=sw1-p1 \
+    options:tx_pcap=hv2/vif1-tx.pcap \
+    options:rxq_pcap=hv2/vif1-rx.pcap \
+    ofport-request=1
+
+ovn-nbctl ls-add sw0
+
+ovn-nbctl lsp-add sw0 sw0-p1
+ovn-nbctl lsp-set-addresses sw0-p1 "50:54:00:00:00:03 10.0.0.3"
+ovn-nbctl lsp-set-port-security sw0-p1 "50:54:00:00:00:03 10.0.0.3"
+
+ovn-nbctl lsp-set-addresses sw0-p2 "50:54:00:00:00:04 10.0.0.4"
+ovn-nbctl lsp-set-port-security sw0-p2 "50:54:00:00:00:04 10.0.0.4"
+
+# Create the second logical switch with one port
+ovn-nbctl ls-add sw1
+ovn-nbctl lsp-add sw1 sw1-p1
+ovn-nbctl lsp-set-addresses sw1-p1 "40:54:00:00:00:03 20.0.0.3"
+ovn-nbctl lsp-set-port-security sw1-p1 "40:54:00:00:00:03 20.0.0.3"
+
+# Create a logical router and attach both logical switches
+ovn-nbctl lr-add lr0
+ovn-nbctl lrp-add lr0 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
+ovn-nbctl lsp-add sw0 sw0-lr0
+ovn-nbctl lsp-set-type sw0-lr0 router
+ovn-nbctl lsp-set-addresses sw0-lr0 router
+ovn-nbctl lsp-set-options sw0-lr0 router-port=lr0-sw0
+
+ovn-nbctl lrp-add lr0 lr0-sw1 00:00:00:00:ff:02 20.0.0.1/24
+ovn-nbctl lsp-add sw1 sw1-lr0
+ovn-nbctl lsp-set-type sw1-lr0 router
+ovn-nbctl lsp-set-addresses sw1-lr0 router
+ovn-nbctl lsp-set-options sw1-lr0 router-port=lr0-sw1
+
+ovn-nbctl lb-add lb1 10.0.0.10:80 10.0.0.3:80,20.0.0.3:80
+
+ovn-nbctl --wait=sb set load_balancer . ip_port_mappings:10.0.0.3=sw0-p1:10.0.0.2
+ovn-nbctl --wait=sb set load_balancer . ip_port_mappings:20.0.0.3=sw1-p1:20.0.0.2
+
+ovn-nbctl --wait=sb -- --id=@hc create \
+Load_Balancer_Health_Check vip="10.0.0.10\:80" -- add Load_Balancer . \
+health_check @hc
+
+ovn-nbctl --wait=sb ls-lb-add sw0 lb1
+ovn-nbctl --wait=sb ls-lb-add sw1 lb1
+ovn-nbctl --wait=sb lr-lb-add lr0 lb1
+
+OVN_POPULATE_ARP
+ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL([test 2 = `ovn-sbctl --bare --columns _uuid find \
+service_monitor | sed '/^$/d' | wc -l`])
+
+ovn-sbctl dump-flows sw0 | grep ct_lb | grep priority=120 > lflows.txt
+AT_CHECK([cat lflows.txt], [0], [dnl
+  table=10(ls_in_stateful     ), priority=120  , match=(ct.new && ip4.dst == 10.0.0.10 && tcp.dst == 80), action=(ct_lb(10.0.0.3:80,20.0.0.3:80);)
+])
+
+# get the svc monitor mac.
+svc_mon_src_mac=`ovn-nbctl get NB_Global . options:svc_monitor_mac | \
+sed s/":"//g | sed s/\"//g`
+
+OVS_WAIT_UNTIL(
+    [test 1 = `$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" hv1/vif1-tx.pcap | \
+grep "505400000003${svc_mon_src_mac}" | wc -l`]
+)
+
+OVS_WAIT_UNTIL(
+    [test 1 = `$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" hv2/vif1-tx.pcap | \
+grep "405400000003${svc_mon_src_mac}" | wc -l`]
+)
+
+OVS_WAIT_UNTIL([test 2 = `ovn-sbctl --bare --columns status find \
+service_monitor | grep offline | wc -l`])
+
+OVS_WAIT_UNTIL(
+    [test 2 = `$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" hv1/vif1-tx.pcap | \
+grep "505400000003${svc_mon_src_mac}" | wc -l`]
+)
+
+OVS_WAIT_UNTIL(
+    [test 2 = `$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" hv2/vif1-tx.pcap | \
+grep "405400000003${svc_mon_src_mac}" | wc -l`]
+)
+
+ovn-sbctl dump-flows sw0 | grep "ip4.dst == 10.0.0.10 && tcp.dst == 80" \
+| grep priority=120 > lflows.txt
+AT_CHECK([cat lflows.txt], [0], [dnl
+  table=10(ls_in_stateful     ), priority=120  , match=(ct.new && ip4.dst == 10.0.0.10 && tcp.dst == 80), action=(drop;)
+])
+
+OVN_CLEANUP([hv1], [hv2])
+AT_CLEANUP
+
+AT_SETUP([ovn -- ARP/ND request broadcast limiting])
+AT_SKIP_IF([test $HAVE_PYTHON = no])
+ovn_start
+
+ip_to_hex() {
+    printf "%02x%02x%02x%02x" "$@"
+}
+
+send_arp_request() {
+    local hv=$1 inport=$2 eth_src=$3 spa=$4 tpa=$5
+    local eth_dst=ffffffffffff
+    local eth_type=0806
+    local eth=${eth_dst}${eth_src}${eth_type}
+
+    local arp=0001080006040001${eth_src}${spa}${eth_dst}${tpa}
+
+    local request=${eth}${arp}
+    as hv$hv ovs-appctl netdev-dummy/receive hv${hv}-vif$inport $request
+}
+
+send_nd_ns() {
+    local hv=$1 inport=$2 eth_src=$3 spa=$4 tpa=$5 cksum=$6
+
+    local eth_dst=ffffffffffff
+    local eth_type=86dd
+    local eth=${eth_dst}${eth_src}${eth_type}
+
+    local ip_vhlen=60000000
+    local ip_plen=0020
+    local ip_next=3a
+    local ip_ttl=ff
+    local ip=${ip_vhlen}${ip_plen}${ip_next}${ip_ttl}${spa}${tpa}
+
+    # Neighbor Solicitation
+    local icmp6_type=87
+    local icmp6_code=00
+    local icmp6_rsvd=00000000
+    # ICMPv6 source lla option
+    local icmp6_opt=01
+    local icmp6_optlen=01
+    local icmp6=${icmp6_type}${icmp6_code}${cksum}${icmp6_rsvd}${tpa}${icmp6_opt}${icmp6_optlen}${eth_src}
+
+    local request=${eth}${ip}${icmp6}
+
+    as hv$hv ovs-appctl netdev-dummy/receive hv${hv}-vif$inport $request
+}
+
+src_mac=000000000001
+
+net_add n1
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+
+ovs-vsctl -- add-port br-int hv1-vif1 -- \
+    set interface hv1-vif1 external-ids:iface-id=sw-agg-ext \
+    options:tx_pcap=hv1/vif1-tx.pcap \
+    options:rxq_pcap=hv1/vif1-rx.pcap \
+    ofport-request=1
+
+# One Aggregation Switch connected to two Logical networks (routers).
+ovn-nbctl ls-add sw-agg
+ovn-nbctl lsp-add sw-agg sw-agg-ext \
+    -- lsp-set-addresses sw-agg-ext 00:00:00:00:00:01
+
+ovn-nbctl lsp-add sw-agg sw-rtr1                   \
+    -- lsp-set-type sw-rtr1 router                 \
+    -- lsp-set-addresses sw-rtr1 00:00:00:00:01:00 \
+    -- lsp-set-options sw-rtr1 router-port=rtr1-sw
+ovn-nbctl lsp-add sw-agg sw-rtr2                   \
+    -- lsp-set-type sw-rtr2 router                 \
+    -- lsp-set-addresses sw-rtr2 00:00:00:00:02:00 \
+    -- lsp-set-options sw-rtr2 router-port=rtr2-sw
+
+# Configure L3 interface IPv4 & IPv6 on both routers
+ovn-nbctl lr-add rtr1
+ovn-nbctl lrp-add rtr1 rtr1-sw 00:00:00:00:01:00 10.0.0.1/24 10::1/64
+
+ovn-nbctl lr-add rtr2
+ovn-nbctl lrp-add rtr2 rtr2-sw 00:00:00:00:02:00 10.0.0.2/24 10::2/64
+
+OVN_POPULATE_ARP
+ovn-nbctl --wait=hv sync
+
+sw_dp_uuid=$(ovn-sbctl --bare --columns _uuid list datapath_binding sw-agg)
+sw_dp_key=$(ovn-sbctl --bare --columns tunnel_key list datapath_binding sw-agg)
+
+r1_tnl_key=$(ovn-sbctl --bare --columns tunnel_key list port_binding sw-rtr1)
+r2_tnl_key=$(ovn-sbctl --bare --columns tunnel_key list port_binding sw-rtr2)
+
+mc_key=$(ovn-sbctl --bare --columns tunnel_key find multicast_group datapath=${sw_dp_uuid} name="_MC_flood")
+mc_key=$(printf "%04x" $mc_key)
+
+match_sw_metadata="metadata=0x${sw_dp_key}"
+
+# Inject ARP request for first router owned IP address.
+send_arp_request 1 1 ${src_mac} $(ip_to_hex 10 0 0 254) $(ip_to_hex 10 0 0 1)
+
+# Verify that the ARP request is sent only to rtr1.
+match_arp_req="priority=75.*${match_sw_metadata}.*arp_tpa=10.0.0.1,arp_op=1"
+match_send_rtr1="load:0x${r1_tnl_key}->NXM_NX_REG15"
+match_send_rtr2="load:0x${r2_tnl_key}->NXM_NX_REG15"
+
+as hv1
+OVS_WAIT_UNTIL([
+    pkts_to_rtr1=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_arp_req}" | grep "${match_send_rtr1}" | \
+    grep n_packets=1 -c)
+    test "1" = "${pkts_to_rtr1}"
+])
+OVS_WAIT_UNTIL([
+    pkts_to_rtr2=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_arp_req}" | grep "${match_send_rtr2}" | \
+    grep n_packets=1 -c)
+    test "0" = "${pkts_to_rtr2}"
+])
+OVS_WAIT_UNTIL([
+    pkts_flooded=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_sw_metadata}" | grep ${mc_key} | grep -v n_packets=0 -c)
+    test "0" = "${pkts_flooded}"
+])
+
+# Inject ND_NS for ofirst router owned IP address.
+src_ipv6=00100000000000000000000000000254
+dst_ipv6=00100000000000000000000000000001
+send_nd_ns 1 1 ${src_mac} ${src_ipv6} ${dst_ipv6} 751d
+
+# Verify that the ND_NS is sent only to rtr1.
+match_nd_ns="priority=75.*${match_sw_metadata}.*icmp_type=135.*nd_target=10::1"
+
+as hv1
+OVS_WAIT_UNTIL([
+    pkts_to_rtr1=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_nd_ns}" | grep "${match_send_rtr1}" | \
+    grep n_packets=1 -c)
+    test "1" = "${pkts_to_rtr1}"
+])
+OVS_WAIT_UNTIL([
+    pkts_to_rtr2=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_nd_ns}" | grep "${match_send_rtr2}" | \
+    grep n_packets=1 -c)
+    test "0" = "${pkts_to_rtr2}"
+])
+OVS_WAIT_UNTIL([
+    pkts_flooded=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_sw_metadata}" | grep ${mc_key} | grep -v n_packets=0 -c)
+    test "0" = "${pkts_flooded}"
+])
+
+# Configure load balancing on both routers.
+ovn-nbctl lb-add lb1-v4 10.0.0.11 42.42.42.1
+ovn-nbctl lb-add lb1-v6 10::11 42::1
+ovn-nbctl lr-lb-add rtr1 lb1-v4
+ovn-nbctl lr-lb-add rtr1 lb1-v6
+
+ovn-nbctl lb-add lb2-v4 10.0.0.22 42.42.42.2
+ovn-nbctl lb-add lb2-v6 10::22 42::2
+ovn-nbctl lr-lb-add rtr2 lb2-v4
+ovn-nbctl lr-lb-add rtr2 lb2-v6
+ovn-nbctl --wait=hv sync
+
+# Inject ARP request for first router owned VIP address.
+send_arp_request 1 1 ${src_mac} $(ip_to_hex 10 0 0 254) $(ip_to_hex 10 0 0 11)
+
+# Verify that the ARP request is sent only to rtr1.
+match_arp_req="priority=75.*${match_sw_metadata}.*arp_tpa=10.0.0.11,arp_op=1"
+match_send_rtr1="load:0x${r1_tnl_key}->NXM_NX_REG15"
+match_send_rtr2="load:0x${r2_tnl_key}->NXM_NX_REG15"
+
+as hv1
+OVS_WAIT_UNTIL([
+    pkts_to_rtr1=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_arp_req}" | grep "${match_send_rtr1}" | \
+    grep n_packets=1 -c)
+    test "1" = "${pkts_to_rtr1}"
+])
+OVS_WAIT_UNTIL([
+    pkts_to_rtr2=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_arp_req}" | grep "${match_send_rtr2}" | \
+    grep n_packets=1 -c)
+    test "0" = "${pkts_to_rtr2}"
+])
+OVS_WAIT_UNTIL([
+    pkts_flooded=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_sw_metadata}" | grep ${mc_key} | grep -v n_packets=0 -c)
+    test "0" = "${pkts_flooded}"
+])
+
+# Inject ND_NS for first router owned VIP address.
+src_ipv6=00100000000000000000000000000254
+dst_ipv6=00100000000000000000000000000011
+send_nd_ns 1 1 ${src_mac} ${src_ipv6} ${dst_ipv6} 751d
+
+# Verify that the ND_NS is sent only to rtr1.
+match_nd_ns="priority=75.*${match_sw_metadata}.*icmp_type=135.*nd_target=10::11"
+
+as hv1
+OVS_WAIT_UNTIL([
+    pkts_to_rtr1=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_nd_ns}" | grep "${match_send_rtr1}" | \
+    grep n_packets=1 -c)
+    test "1" = "${pkts_to_rtr1}"
+])
+OVS_WAIT_UNTIL([
+    pkts_to_rtr2=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_nd_ns}" | grep "${match_send_rtr2}" | \
+    grep n_packets=1 -c)
+    test "0" = "${pkts_to_rtr2}"
+])
+OVS_WAIT_UNTIL([
+    pkts_flooded=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_sw_metadata}" | grep ${mc_key} | grep -v n_packets=0 -c)
+    test "0" = "${pkts_flooded}"
+])
+
+# Configure NAT on both routers
+ovn-nbctl lr-nat-add rtr1 dnat_and_snat 10.0.0.111 42.42.42.1
+ovn-nbctl lr-nat-add rtr1 dnat_and_snat 10::111 42::1
+ovn-nbctl lr-nat-add rtr2 dnat_and_snat 10.0.0.222 42.42.42.2
+ovn-nbctl lr-nat-add rtr2 dnat_and_snat 10::222 42::2
+
+# Inject ARP request for first router owned NAT address.
+send_arp_request 1 1 ${src_mac} $(ip_to_hex 10 0 0 254) $(ip_to_hex 10 0 0 111)
+
+# Verify that the ARP request is sent only to rtr1.
+match_arp_req="priority=75.*${match_sw_metadata}.*arp_tpa=10.0.0.111,arp_op=1"
+match_send_rtr1="load:0x${r1_tnl_key}->NXM_NX_REG15"
+match_send_rtr2="load:0x${r2_tnl_key}->NXM_NX_REG15"
+
+as hv1
+OVS_WAIT_UNTIL([
+    pkts_to_rtr1=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_arp_req}" | grep "${match_send_rtr1}" | \
+    grep n_packets=1 -c)
+    test "1" = "${pkts_to_rtr1}"
+])
+OVS_WAIT_UNTIL([
+    pkts_to_rtr2=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_arp_req}" | grep "${match_send_rtr2}" | \
+    grep n_packets=1 -c)
+    test "0" = "${pkts_to_rtr2}"
+])
+OVS_WAIT_UNTIL([
+    pkts_flooded=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_sw_metadata}" | grep ${mc_key} | grep -v n_packets=0 -c)
+    test "0" = "${pkts_flooded}"
+])
+
+# Inject ND_NS for first router owned IP address.
+src_ipv6=00100000000000000000000000000254
+dst_ipv6=00100000000000000000000000000111
+send_nd_ns 1 1 ${src_mac} ${src_ipv6} ${dst_ipv6} 751d
+
+# Verify that the ND_NS is sent only to rtr1.
+match_nd_ns="priority=75.*${match_sw_metadata}.*icmp_type=135.*nd_target=10::111"
+
+as hv1
+OVS_WAIT_UNTIL([
+    pkts_to_rtr1=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_nd_ns}" | grep "${match_send_rtr1}" | \
+    grep n_packets=1 -c)
+    test "1" = "${pkts_to_rtr1}"
+])
+OVS_WAIT_UNTIL([
+    pkts_to_rtr2=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_nd_ns}" | grep "${match_send_rtr2}" | \
+    grep n_packets=1 -c)
+    test "0" = "${pkts_to_rtr2}"
+])
+OVS_WAIT_UNTIL([
+    pkts_flooded=$(ovs-ofctl dump-flows br-int | \
+    grep -E "${match_sw_metadata}" | grep ${mc_key} | grep -v n_packets=0 -c)
+    test "0" = "${pkts_flooded}"
+])
+
+OVN_CLEANUP([hv1])
 AT_CLEANUP
