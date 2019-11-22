@@ -55,6 +55,7 @@ static unixctl_cb_func ovn_northd_exit;
 static unixctl_cb_func ovn_northd_pause;
 static unixctl_cb_func ovn_northd_resume;
 static unixctl_cb_func ovn_northd_is_paused;
+static unixctl_cb_func ovn_northd_status;
 
 struct northd_context {
     struct ovsdb_idl *ovnnb_idl;
@@ -7976,6 +7977,11 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         ovn_lflow_add(lflows, od, S_ROUTER_OUT_UNDNAT, 0, "1", "next;");
         ovn_lflow_add(lflows, od, S_ROUTER_OUT_EGR_LOOP, 0, "1", "next;");
 
+        /* Send the IPv6 NS packets to next table. When ovn-controller
+         * generates IPv6 NS (for the action - nd_ns{}), the injected
+         * packet would go through conntrack - which is not required. */
+        ovn_lflow_add(lflows, od, S_ROUTER_OUT_SNAT, 120, "nd_ns", "next;");
+
         /* NAT rules are only valid on Gateway routers and routers with
          * l3dgw_port (router has a port with "redirect-chassis"
          * specified). */
@@ -9319,7 +9325,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         }
 
         ovn_lflow_add(lflows, od, S_ROUTER_IN_ARP_REQUEST, 100,
-                      "eth.dst == 00:00:00:00:00:00",
+                      "eth.dst == 00:00:00:00:00:00 && ip4",
                       "arp { "
                       "eth.dst = ff:ff:ff:ff:ff:ff; "
                       "arp.spa = reg1; "
@@ -9328,7 +9334,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                       "output; "
                       "};");
         ovn_lflow_add(lflows, od, S_ROUTER_IN_ARP_REQUEST, 100,
-                      "eth.dst == 00:00:00:00:00:00",
+                      "eth.dst == 00:00:00:00:00:00 && ip6",
                       "nd_ns { "
                       "nd.target = xxreg0; "
                       "output; "
@@ -10838,6 +10844,7 @@ main(int argc, char *argv[])
     int retval;
     bool exiting;
     bool paused;
+    bool had_lock;
 
     fatal_ignore_sigpipe();
     ovs_cmdl_proctitle_init(argc, argv);
@@ -10863,6 +10870,7 @@ main(int argc, char *argv[])
     unixctl_command_register("resume", "", 0, 0, ovn_northd_resume, &paused);
     unixctl_command_register("is-paused", "", 0, 0, ovn_northd_is_paused,
                              &paused);
+    unixctl_command_register("status", "", 0, 0, ovn_northd_status, &had_lock);
 
     daemonize_complete();
 
@@ -11068,11 +11076,11 @@ main(int argc, char *argv[])
      * acquiring a lock called "ovn_northd" on the southbound database
      * and then only performing DB transactions if the lock is held. */
     ovsdb_idl_set_lock(ovnsb_idl_loop.idl, "ovn_northd");
-    bool had_lock = false;
 
     /* Main loop. */
     exiting = false;
     paused = false;
+    had_lock = false;
     while (!exiting) {
         if (!paused) {
             struct northd_context ctx = {
@@ -11179,4 +11187,19 @@ ovn_northd_is_paused(struct unixctl_conn *conn, int argc OVS_UNUSED,
     } else {
         unixctl_command_reply(conn, "false");
     }
+}
+
+static void
+ovn_northd_status(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                  const char *argv[] OVS_UNUSED, void *had_lock_)
+{
+    bool *had_lock = had_lock_;
+    /*
+     * Use a labelled formatted output so we can add more to the status command
+     * later without breaking any consuming scripts
+     */
+    struct ds s = DS_EMPTY_INITIALIZER;
+    ds_put_format(&s, "Status: %s\n", *had_lock ? "active" : "standby");
+    unixctl_command_reply(conn, ds_cstr(&s));
+    ds_destroy(&s);
 }
